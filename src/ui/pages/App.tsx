@@ -244,6 +244,7 @@ export default function App() {
   const [isReady, setIsReady] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [isThreadLoading, setIsThreadLoading] = useState(false);
   const contextSyncRetryTimeoutRef = useRef<number | null>(null);
 
   const chatkitApiUrl =
@@ -442,6 +443,7 @@ export default function App() {
       if (threadId) {
         setContextSynced(false);
       }
+      setIsThreadLoading(Boolean(threadId));
       setContextSyncAttempt(0);
       if (typeof window !== "undefined" && contextSyncRetryTimeoutRef.current != null) {
         window.clearTimeout(contextSyncRetryTimeoutRef.current);
@@ -461,6 +463,14 @@ export default function App() {
     []
   );
 
+  const handleThreadLoadStart = useCallback(() => {
+    setIsThreadLoading(true);
+  }, []);
+
+  const handleThreadLoadEnd = useCallback(() => {
+    setIsThreadLoading(false);
+  }, []);
+
   const chatKit = useChatKit({
     api: {
       url: chatkitApiUrl,
@@ -479,6 +489,8 @@ export default function App() {
     onLog: handleLog,
     onError: handleError,
     onThreadChange: handleThreadChange,
+    onThreadLoadStart: handleThreadLoadStart,
+    onThreadLoadEnd: handleThreadLoadEnd,
   });
 
   const prefillComposer = useCallback(
@@ -512,13 +524,15 @@ export default function App() {
     // 3. We haven't already synced for this thread
     // 4. There's an active thread (required for sendCustomAction)
     // 5. The assistant is idle (sendCustomAction cannot run while responding)
+    // 6. The thread is fully loaded
     if (
       !chatKit ||
       !isReady ||
       !hasUserContext ||
       contextSynced ||
       !activeThreadId ||
-      isResponding
+      isResponding ||
+      isThreadLoading
     ) {
       return;
     }
@@ -543,7 +557,10 @@ export default function App() {
           return;
         }
 
-        if (message.includes("already responding")) {
+        if (
+          message.includes("already responding") ||
+          message.includes("thread is loading")
+        ) {
           if (contextSyncAttempt + 1 > MAX_CONTEXT_SYNC_ATTEMPTS) {
             console.error(
               `[chatkit] failed to sync user context after ${MAX_CONTEXT_SYNC_ATTEMPTS} attempts`,
@@ -581,6 +598,7 @@ export default function App() {
     userContext,
     activeThreadId,
     isResponding,
+    isThreadLoading,
     contextSyncAttempt,
   ]);
 
