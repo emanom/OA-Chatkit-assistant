@@ -348,16 +348,6 @@ export class FyiChatKitServer extends ChatKitServer {
     return markdown;
   }
 
-  convertMarkdownLinksToInlineUrls(text) {
-    if (typeof text !== "string" || text.length === 0) {
-      return "";
-    }
-    if (!text.includes("](")) {
-      return text;
-    }
-    return text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1 ($2)");
-  }
-
   formatTextForChatKit(value) {
     if (typeof value !== "string") {
       return "";
@@ -371,7 +361,6 @@ export class FyiChatKitServer extends ChatKitServer {
       text = this.convertHtmlToMarkdown(text);
     }
 
-    text = this.convertMarkdownLinksToInlineUrls(text);
     return text;
   }
 
