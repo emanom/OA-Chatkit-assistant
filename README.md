@@ -29,6 +29,15 @@ VECTOR_STORE_ID=vs_68f6372d0fc48191a629f4a6eb0a7806
 # HISTORY_MAX_CHAR_LENGTH=2400
 # VECTOR_MAX_RESULTS=6
 # ROUTER_CONFIDENCE_THRESHOLD=0.75
+
+# Optional attachment support (uploads -> Amazon S3)
+# ATTACHMENTS_BUCKET=pubsupchat-attach
+# ATTACHMENTS_PREFIX=chat-uploads/
+# ATTACHMENTS_MAX_BYTES=52428800          # 50 MB
+# ATTACHMENTS_UPLOAD_URL_TTL=300          # seconds
+# ATTACHMENTS_DOWNLOAD_URL_TTL=604800     # seconds (7 days)
+# IMAGE_DESCRIPTION_MODEL=gpt-4o-mini
+# IMAGE_DESCRIPTION_MAX_OUTPUT_TOKENS=400
 ```
 
 `deploy.ps1` automatically resolves `VITE_CHATKIT_DOMAIN_KEY` (defaulting to `domain_pk_6909d8601d648190bb9ddb0da3c031f301049fa90975526f`), exports it for the Vite build, and forwards it to the Docker build so every bundle carries the registered domain key. Override it if you are targeting a different allow-listed hostname.
@@ -55,6 +64,16 @@ npm run dev             # launches the chat UI at http://localhost:5173
 
 - The Vite dev server proxies API calls to `http://localhost:3000`. Override with `VITE_API_URL`.
 - Build static assets with `npm run build`; the Express server will automatically serve `dist/` in production.
+
+### Attachments & Amazon S3 uploads
+
+- Users can attach files via the uploader beneath the quick actions panel. Every upload:
+  - Calls `POST /api/attachments/sign` to mint a pre-signed PUT to `s3://pubsupchat-attach/chat-uploads/<thread-id>/…`.
+  - Streams the bytes directly from the browser to S3 (so the ECS task doesn’t proxy large payloads).
+  - Sends a `fyi.cascade.attachment` action so the backend stores attachment metadata alongside the thread.
+- Image attachments trigger `POST /api/attachments/describe`, which signs a short-lived GET URL and asks `IMAGE_DESCRIPTION_MODEL` (default `gpt-4o-mini`) to summarise the picture. The vision summary and S3 link are added to the user context before each cascade run, so both router and heavy agents can reason about the file immediately.
+- Set the `ATTACHMENTS_*` env vars (bucket, prefix, size limit, signed URL TTLs) to match your AWS account. The ECS task role needs `s3:PutObject`/`s3:GetObject` for the configured bucket prefix.
+- Uploaded links are also prefilling the ChatKit composer so the end user can reference or edit the attachment note before sending their question.
 
 ### Container deployment
 

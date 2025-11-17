@@ -3,8 +3,12 @@ import cors from "cors";
 import morgan from "morgan";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { runCascade } from "../src/cascade.js";
+import { openai } from "../src/config.js";
 import { handleChatKitRequest } from "./chatkit.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "3000", 10);
@@ -18,7 +22,7 @@ const uiBundleExists = fs.existsSync(indexHtmlPath);
 
 app.disable("x-powered-by");
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 app.use(
   morgan(process.env.NODE_ENV === "production" ? "combined" : "dev", {
     skip: () => process.env.MORGAN_DISABLED === "true",
@@ -29,9 +33,89 @@ if (uiBundleExists) {
   app.use(express.static(distPath, { index: false }));
 }
 
+const attachmentsBucket = process.env.ATTACHMENTS_BUCKET ?? "pubsupchat-attach";
+const attachmentsPrefix = process.env.ATTACHMENTS_PREFIX ?? "chat-uploads/";
+const attachmentsMaxBytes = Number.parseInt(
+  process.env.ATTACHMENTS_MAX_BYTES ?? String(50 * 1024 * 1024),
+  10
+);
+const uploadUrlTtlSeconds = Number.parseInt(
+  process.env.ATTACHMENTS_UPLOAD_URL_TTL ?? "300",
+  10
+);
+const downloadUrlTtlSeconds = Number.parseInt(
+  process.env.ATTACHMENTS_DOWNLOAD_URL_TTL ?? String(7 * 24 * 60 * 60),
+  10
+);
+const imageDescriptionModel =
+  process.env.IMAGE_DESCRIPTION_MODEL ?? "gpt-4o-mini";
+const imageDescriptionMaxTokens = Number.parseInt(
+  process.env.IMAGE_DESCRIPTION_MAX_OUTPUT_TOKENS ?? "400",
+  10
+);
+
+const s3Region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "ap-southeast-2";
+const s3 = new S3Client({ region: s3Region });
+
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", uptime: process.uptime() });
 });
+
+app.post(
+  "/api/attachments/sign",
+  withErrorHandling(async (req, res) => {
+    const { filename, contentType, size, threadId } = req.body ?? {};
+
+    if (typeof filename !== "string" || filename.trim().length === 0) {
+      sendJson(res, 400, { error: "filename is required" });
+      return;
+    }
+    if (typeof contentType !== "string" || contentType.trim().length === 0) {
+      sendJson(res, 400, { error: "contentType is required" });
+      return;
+    }
+    if (!Number.isFinite(size) || size <= 0) {
+      sendJson(res, 400, { error: "size must be provided in bytes" });
+      return;
+    }
+    if (size > attachmentsMaxBytes) {
+      sendJson(res, 413, {
+        error: `Attachments cannot exceed ${attachmentsMaxBytes} bytes`,
+      });
+      return;
+    }
+
+    const key = buildAttachmentKey(threadId, filename);
+    const uploadUrl = await signUploadUrl(key, contentType);
+    const assetUrl = await signDownloadUrl(key);
+
+    sendJson(res, 200, {
+      uploadUrl,
+      assetUrl,
+      key,
+      bucket: attachmentsBucket,
+      maxBytes: attachmentsMaxBytes,
+    });
+  })
+);
+
+app.post(
+  "/api/attachments/describe",
+  withErrorHandling(async (req, res) => {
+    const { key, contentType } = req.body ?? {};
+    if (typeof key !== "string" || key.trim().length === 0) {
+      sendJson(res, 400, { error: "key is required" });
+      return;
+    }
+    if (contentType && typeof contentType === "string" && !contentType.startsWith("image/")) {
+      sendJson(res, 400, { error: "Only image attachments can be described automatically." });
+      return;
+    }
+
+    const description = await describeImageAttachment(key);
+    sendJson(res, 200, { description });
+  })
+);
 
 const parseHistory = (value) => {
   if (!Array.isArray(value)) return [];
@@ -142,6 +226,88 @@ const parseContext = (value) => {
 
 const sendJson = (res, statusCode, payload) => {
   res.status(statusCode).json(payload);
+};
+
+const buildSafeFilename = (name) => {
+  if (typeof name !== "string" || name.trim().length === 0) {
+    return `file-${crypto.randomUUID()}`;
+  }
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 200);
+};
+
+const buildAttachmentKey = (threadId, filename) => {
+  const folder = threadId
+    ? `${attachmentsPrefix}${threadId}`
+    : `${attachmentsPrefix}session-${crypto.randomUUID()}`;
+  return `${folder}/${Date.now()}-${buildSafeFilename(filename)}`;
+};
+
+const signUploadUrl = async (key, contentType) => {
+  const command = new PutObjectCommand({
+    Bucket: attachmentsBucket,
+    Key: key,
+    ContentType: contentType,
+  });
+  return getSignedUrl(s3, command, { expiresIn: uploadUrlTtlSeconds });
+};
+
+const signDownloadUrl = async (key, expiresIn = downloadUrlTtlSeconds) => {
+  const command = new GetObjectCommand({
+    Bucket: attachmentsBucket,
+    Key: key,
+  });
+  return getSignedUrl(s3, command, { expiresIn });
+};
+
+const extractOutputText = (response) => {
+  if (!response) return "";
+  if (typeof response.output_text === "string" && response.output_text.length > 0) {
+    return response.output_text;
+  }
+
+  if (Array.isArray(response.output)) {
+    const segments = [];
+    for (const item of response.output) {
+      if (item?.type !== "message" || !Array.isArray(item.content)) continue;
+      for (const content of item.content) {
+        if (content?.type === "output_text" && content.text) {
+          segments.push(content.text);
+        }
+      }
+    }
+    if (segments.length) {
+      return segments.join("");
+    }
+  }
+
+  return "";
+};
+
+const describeImageAttachment = async (key) => {
+  const signedUrl = await signDownloadUrl(key, 120);
+  const response = await openai.responses.create({
+    model: imageDescriptionModel,
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "Describe this image in detail so an FYI support agent understands its contents.",
+          },
+          {
+            type: "input_image",
+            image_url: signedUrl,
+          },
+        ],
+      },
+    ],
+    text: {
+      max_output_tokens: imageDescriptionMaxTokens,
+    },
+  });
+
+  return extractOutputText(response).trim();
 };
 
 const withErrorHandling = (handler) => async (req, res) => {

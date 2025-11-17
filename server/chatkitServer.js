@@ -17,6 +17,13 @@ const asPlainText = (value) =>
 const joinSegments = (segments) =>
   segments.map(asPlainText).filter(Boolean).join("\n\n");
 
+const sanitizeString = (value, limit = 200) => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, limit);
+};
+
 const buildAssistantContent = (text) => [
   {
     type: "output_text",
@@ -84,11 +91,25 @@ export class FyiChatKitServer extends ChatKitServer {
       context
     );
 
-    const cascadeContext =
+    const baseCascadeContext =
       (thread.metadata?.cascadeUserContext &&
       typeof thread.metadata.cascadeUserContext === "object"
         ? clone(thread.metadata.cascadeUserContext)
         : undefined) ?? undefined;
+
+    const cascadeAttachments =
+      Array.isArray(thread.metadata?.cascadeAttachments) &&
+      thread.metadata.cascadeAttachments.length > 0
+        ? clone(thread.metadata.cascadeAttachments)
+        : [];
+
+    const cascadeContext =
+      cascadeAttachments.length > 0
+        ? {
+            ...(baseCascadeContext ?? {}),
+            attachments: cascadeAttachments,
+          }
+        : baseCascadeContext;
 
     yield buildProgressEvent("cascade.stage analyzing");
 
@@ -203,6 +224,36 @@ export class FyiChatKitServer extends ChatKitServer {
           cascadeContextUpdatedAt: new Date().toISOString(),
         };
       }
+      return;
+    }
+
+    if (action?.type === "fyi.cascade.attachment") {
+      const attachment = action?.payload?.attachment;
+      if (!attachment || typeof attachment !== "object") {
+        return;
+      }
+
+      const normalized = {
+        id: sanitizeString(attachment.id, 200) ?? this.store.generateItemId("attachment", thread, undefined),
+        name: sanitizeString(attachment.name, 200) ?? "attachment",
+        mimeType: sanitizeString(attachment.mimeType, 120) ?? "application/octet-stream",
+        url: sanitizeString(attachment.url, 600) ?? null,
+        size: Number.isFinite(attachment.size) ? Number(attachment.size) : null,
+        description: sanitizeString(attachment.description, 2000) ?? null,
+        uploadedAt: sanitizeString(attachment.uploadedAt, 80) ?? new Date().toISOString(),
+      };
+
+      const existing = Array.isArray(thread.metadata?.cascadeAttachments)
+        ? [...thread.metadata.cascadeAttachments]
+        : [];
+      existing.unshift(normalized);
+      const MAX_ATTACHMENTS = 20;
+
+      thread.metadata = {
+        ...thread.metadata,
+        cascadeAttachments: existing.slice(0, MAX_ATTACHMENTS),
+        cascadeAttachmentsUpdatedAt: new Date().toISOString(),
+      };
       return;
     }
 

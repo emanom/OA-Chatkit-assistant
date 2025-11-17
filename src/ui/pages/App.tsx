@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { ChatKit, useChatKit } from "@openai/chatkit-react";
 
 const THREAD_STORAGE_KEY = "fyi-chatkit:last-thread";
@@ -245,6 +252,8 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [isThreadLoading, setIsThreadLoading] = useState(false);
+  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const [attachmentStatus, setAttachmentStatus] = useState<string | null>(null);
   const contextSyncRetryTimeoutRef = useRef<number | null>(null);
 
   const chatkitApiUrl =
@@ -471,6 +480,8 @@ export default function App() {
     setIsThreadLoading(false);
   }, []);
 
+  const canUploadAttachments = Boolean(activeThreadId) && !isThreadLoading;
+
   const chatKit = useChatKit({
     api: {
       url: chatkitApiUrl,
@@ -510,6 +521,126 @@ export default function App() {
       }
     },
     [chatKit, activeThreadId]
+  );
+
+  const uploadAttachment = useCallback(
+    async (file: File) => {
+      if (!chatKit || !activeThreadId) {
+        setAttachmentStatus("Start a conversation before uploading attachments.");
+        return;
+      }
+
+      const contentType = file.type || "application/octet-stream";
+      setIsUploadingAttachment(true);
+      setAttachmentStatus(`Uploading ${file.name}...`);
+
+      try {
+        const signResponse = await fetch("/api/attachments/sign", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            filename: file.name,
+            contentType,
+            size: file.size,
+            threadId: activeThreadId,
+          }),
+        });
+
+        if (!signResponse.ok) {
+          const errorBody = await signResponse.json().catch(() => ({}));
+          throw new Error(
+            errorBody?.error ?? "Failed to prepare attachment upload."
+          );
+        }
+
+        const { uploadUrl, assetUrl, key } = await signResponse.json();
+
+        const uploadResponse = await fetch(uploadUrl, {
+          method: "PUT",
+          headers: {
+            "Content-Type": contentType,
+          },
+          body: file,
+        });
+
+        if (!uploadResponse.ok) {
+          throw new Error("Upload to storage failed. Please retry.");
+        }
+
+        let description: string | null = null;
+        if (contentType.startsWith("image/")) {
+          const describeResponse = await fetch("/api/attachments/describe", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              key,
+              contentType,
+            }),
+          });
+
+          if (describeResponse.ok) {
+            const describePayload = await describeResponse.json();
+            if (typeof describePayload.description === "string") {
+              description = describePayload.description.trim();
+            }
+          }
+        }
+
+        await chatKit.sendCustomAction({
+          type: "fyi.cascade.attachment",
+          payload: {
+            attachment: {
+              id: key,
+              name: file.name,
+              mimeType: contentType,
+              size: file.size,
+              url: assetUrl,
+              description,
+              uploadedAt: new Date().toISOString(),
+            },
+          },
+        });
+
+        const snippetLines = [
+          `Attachment uploaded: ${file.name} (${contentType})`,
+          `URL: ${assetUrl}`,
+        ];
+        if (description) {
+          snippetLines.push(`Automatic image summary: ${description}`);
+        }
+        snippetLines.push(
+          "Reference this attachment in your next question so the assistant can help."
+        );
+
+        await prefillComposer(snippetLines.join("\n"));
+        setAttachmentStatus(
+          "Attachment ready in the composer—review and send your question."
+        );
+      } catch (error) {
+        setAttachmentStatus(
+          error instanceof Error ? error.message : "Attachment upload failed."
+        );
+      } finally {
+        setIsUploadingAttachment(false);
+      }
+    },
+    [chatKit, activeThreadId, prefillComposer]
+  );
+
+  const handleAttachmentInputChange = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0] ?? null;
+      event.target.value = "";
+      if (!file) {
+        return;
+      }
+      await uploadAttachment(file);
+    },
+    [uploadAttachment]
   );
 
   useEffect(() => {
@@ -784,6 +915,33 @@ export default function App() {
                 {action.label}
               </button>
             ))}
+            <div className="mt-4 w-full rounded-2xl bg-slate-50/80 p-4 text-left">
+              <label className="block text-sm font-semibold text-slate-700">
+                Upload an attachment
+              </label>
+              <p className="text-xs text-slate-500">
+                Files are stored securely in FYI&rsquo;s S3 bucket so the assistant can reference them.
+              </p>
+              <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                <input
+                  type="file"
+                  onChange={handleAttachmentInputChange}
+                  disabled={!canUploadAttachments || isUploadingAttachment}
+                  className="text-sm text-slate-700"
+                />
+                {!canUploadAttachments && (
+                  <span className="text-xs text-amber-600">
+                    Attachments become available once the thread is ready.
+                  </span>
+                )}
+                {isUploadingAttachment && (
+                  <span className="text-xs text-slate-500">Uploading…</span>
+                )}
+              </div>
+              {attachmentStatus && (
+                <p className="mt-2 text-xs text-slate-600">{attachmentStatus}</p>
+              )}
+            </div>
           </section>
         )}
       </main>

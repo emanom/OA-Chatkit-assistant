@@ -399,6 +399,28 @@ function buildUserContextSummary(context) {
     segments.push(`Timestamp (date): ${date}`);
   }
 
+  if (Array.isArray(context.attachments) && context.attachments.length > 0) {
+    const limited = context.attachments.slice(0, 5);
+    const rendered = limited
+      .map((attachment, index) => {
+        const lines = [];
+        const label = attachment?.name
+          ? `Attachment ${index + 1}: ${attachment.name}`
+          : `Attachment ${index + 1}`;
+        const mime = typeof attachment?.mimeType === "string" ? attachment.mimeType : null;
+        lines.push(mime ? `${label} (${mime})` : label);
+        if (typeof attachment?.url === "string" && attachment.url.trim().length > 0) {
+          lines.push(`URL: ${attachment.url.trim()}`);
+        }
+        if (typeof attachment?.description === "string" && attachment.description.trim().length > 0) {
+          lines.push(`Summary: ${attachment.description.trim()}`);
+        }
+        return lines.join("\n");
+      })
+      .join("\n\n");
+    segments.push(`Attachments:\n${rendered}`);
+  }
+
   return segments.join("\n");
 }
 
