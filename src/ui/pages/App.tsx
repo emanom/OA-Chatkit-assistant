@@ -549,7 +549,9 @@ export default function App() {
         });
 
         if (!signResponse.ok) {
-          const errorBody = await signResponse.json().catch(() => ({}));
+          const errorBody = (await signResponse
+            .json()
+            .catch(() => null)) as { error?: string } | null;
           throw new Error(
             errorBody?.error ?? "Failed to prepare attachment upload."
           );
@@ -681,7 +683,7 @@ export default function App() {
           setContextSyncAttempt(0);
         }
       } catch (error) {
-        const message = typeof error?.message === "string" ? error.message : "";
+        const message = error instanceof Error ? error.message : "";
 
         if (message.includes("no active thread")) {
           // This can happen during initialization; allow a future retry without noise.
