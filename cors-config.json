@@ -1,0 +1,14 @@
+{
+  "CORSRules": [
+    {
+      "AllowedOrigins": [
+        "https://fyi-cascade-alb-2139030396.ap-southeast-2.elb.amazonaws.com",
+        "http://localhost:5173"
+      ],
+      "AllowedMethods": ["GET", "PUT", "POST", "HEAD", "OPTIONS"],
+      "AllowedHeaders": ["*"],
+      "ExposeHeaders": ["ETag"],
+      "MaxAgeSeconds": 3000
+    }
+  ]
+}

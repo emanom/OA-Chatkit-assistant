@@ -69,53 +69,6 @@ const defaultScenarios = [
     label: "Baseline (gpt-5-nano → gpt-5-mini)",
     config: {},
   },
-  {
-    label: "Faster router (gpt-5-nano → gpt-5-mini)",
-    config: {
-      routerModel: "gpt-5-nano",
-      routerReasoning: "low",
-      historyMaxTurns: 3,
-      historyMaxChars: 1800,
-    },
-  },
-  {
-    label: "Balanced quality (gpt-5-nano → gpt-5-mini)",
-    config: {
-      routerModel: "gpt-5-nano",
-      routerReasoning: "low",
-      heavyModel: "gpt-5-mini",
-      heavyVerbosity: "medium",
-      heavyReasoning: "medium",
-      heavyMaxOutputTokens: 1200,
-      vectorMaxResults: 5,
-    },
-  },
-  {
-    label: "Streaming heavy (gpt-4o-mini → gpt-4.1, streaming)",
-    config: {
-      routerModel: "gpt-4o-mini",
-      routerReasoning: "low",
-      heavyModel: "gpt-4.1",
-      heavyVerbosity: "medium",
-      heavyReasoning: "medium",
-      heavyStreamingEnabled: true,
-      vectorMaxResults: 5,
-    },
-  },
-  {
-    label: "Ultra-fast (gpt-5-nano → gpt-5-mini, minimal retrieval)",
-    config: {
-      routerModel: "gpt-5-nano",
-      routerReasoning: "low",
-      heavyModel: "gpt-5-mini",
-      heavyVerbosity: "low",
-      heavyReasoning: "low",
-      vectorMaxResults: 1,
-      promptCacheEnabled: true,
-      historyMaxTurns: 2,
-      historyMaxChars: 1200,
-    },
-  },
 ];
 
 const showAnswer = args.includes("--show-answer");

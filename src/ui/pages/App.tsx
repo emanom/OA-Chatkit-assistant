@@ -1,17 +1,48 @@
-import {
-  ChangeEvent,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatKit, useChatKit } from "@openai/chatkit-react";
 
 const THREAD_STORAGE_KEY = "fyi-chatkit:last-thread";
-const ROUTER_TOOL_ID = "fyi-router";
 const MAX_CONTEXT_SYNC_ATTEMPTS = 5;
 const CONTEXT_SYNC_BASE_DELAY_MS = 250;
+const isThreadMissingError = (value: unknown) => {
+  const message =
+    typeof value === "string"
+      ? value
+      : value instanceof Error
+      ? value.message
+      : typeof value === "object" &&
+        value !== null &&
+        "message" in value &&
+        typeof (value as { message?: unknown }).message === "string"
+      ? ((value as { message?: string }).message as string)
+      : "";
+  if (!message) {
+    return false;
+  }
+  const normalized = message.toLowerCase();
+  return normalized.includes("thread") && normalized.includes("not found");
+};
+const ATTACHMENTS_MAX_BYTES = Number.parseInt(
+  import.meta.env.VITE_ATTACHMENTS_MAX_BYTES ?? String(50 * 1024 * 1024),
+  10
+);
+const ATTACHMENTS_MAX_COUNT = Number.parseInt(
+  import.meta.env.VITE_ATTACHMENTS_MAX_COUNT ?? "4",
+  10
+);
+const ATTACHMENTS_ACCEPTED_TYPES: Record<string, string[]> = {
+  "image/*": [".png", ".jpg", ".jpeg", ".gif", ".webp"],
+  "application/pdf": [".pdf"],
+  "text/plain": [".txt"],
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [
+    ".doc",
+    ".docx",
+  ],
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [
+    ".xls",
+    ".xlsx",
+  ],
+};
 
 type AssistantPhase =
   | "idle"
@@ -166,11 +197,6 @@ const parseUserContextFromQuery = (): {
       context.date = date;
     }
 
-    const displayName =
-      firstName != null
-        ? [firstName, lastName].filter(Boolean).join(" ")
-        : null;
-
     const welcomeContent =
       context.firstName && context.firstName.length > 0
         ? `Hi ${context.firstName} ! Ask me anything about FYI features.`
@@ -204,36 +230,6 @@ const parseInitialThreadId = () => {
   }
 };
 
-const formatConfidence = (confidence?: number | null) => {
-  if (typeof confidence !== "number" || Number.isNaN(confidence)) {
-    return undefined;
-  }
-  return `${Math.round(confidence * 100)}%`;
-};
-
-const assistantPhaseCopy: Record<
-  AssistantPhase,
-  { label: string; tone: "neutral" | "info" | "success" | "warning" | "danger" }
-> = {
-  idle: { label: "Ready for a new question", tone: "neutral" },
-  ready: { label: "ChatKit ready", tone: "info" },
-  thinking: { label: "Reviewing your request…", tone: "info" },
-  router: { label: "Answered immediately", tone: "success" },
-  handoff: { label: "Searching for detailed information…", tone: "info" },
-  heavy: { label: "Preparing detailed answer…", tone: "info" },
-  error: { label: "Issue reaching the cascade", tone: "danger" },
-};
-
-const statusToneClass: Record<AssistantPhase, string> = {
-  idle: "bg-slate-100 text-slate-700 border-slate-200",
-  ready: "bg-emerald-50 text-emerald-700 border-emerald-200",
-  thinking: "bg-sky-50 text-sky-700 border-sky-200",
-  router: "bg-emerald-50 text-emerald-700 border-emerald-200",
-  handoff: "bg-amber-50 text-amber-800 border-amber-200",
-  heavy: "bg-sky-50 text-sky-700 border-sky-200",
-  error: "bg-rose-50 text-rose-700 border-rose-200",
-};
-
 export default function App() {
   const [parsedContext] = useState(parseUserContextFromQuery);
   const [initialThread] = useState<string | null>(parseInitialThreadId);
@@ -244,19 +240,23 @@ export default function App() {
   );
 
   const [assistantPhase, setAssistantPhase] = useState<AssistantPhase>("idle");
+  const [progressText, setProgressText] = useState<string | null>(null);
   const [isResponding, setIsResponding] = useState(false);
   const [routerLog, setRouterLog] = useState<CascadeRouterLog | null>(null);
   const [contextSynced, setContextSynced] = useState(false);
+  const progressTimeoutsRef = useRef<number[]>([]);
+  const isRespondingRef = useRef(false);
+  const responseEndedRef = useRef(false);
+  const responseStartedRef = useRef(false);
   const [contextSyncAttempt, setContextSyncAttempt] = useState(0);
   const [isReady, setIsReady] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [isThreadLoading, setIsThreadLoading] = useState(false);
-  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
-  const [attachmentStatus, setAttachmentStatus] = useState<string | null>(null);
-  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const threadBootstrapRef = useRef(false);
   const contextSyncRetryTimeoutRef = useRef<number | null>(null);
+  const chatKitRef = useRef<ReturnType<typeof useChatKit> | null>(null);
+  const [messageButtons, setMessageButtons] = useState<Map<string, Array<{ label: string; value: string }>>>(new Map());
 
   const chatkitApiUrl =
     import.meta.env.VITE_CHATKIT_API_URL ?? "/api/chatkit";
@@ -322,13 +322,19 @@ export default function App() {
     () => ({
       placeholder: "Ask about FYI…",
       tools: [],
+      attachments: {
+        enabled: true,
+        maxSize: ATTACHMENTS_MAX_BYTES,
+        maxCount: ATTACHMENTS_MAX_COUNT,
+        accept: ATTACHMENTS_ACCEPTED_TYPES,
+      },
     }),
     []
   );
 
   const disclaimer = useMemo(
     () => ({
-      text: "I can help with quick questions instantly and provide detailed answers when needed.",
+      text: "FYI Support Assistant is powered by the [FYI Help Centre](https://support.fyi.app/hc/en-us) articles and OpenAI GPT-5 models.",
       highContrast: false,
     }),
     []
@@ -345,9 +351,33 @@ export default function App() {
 
   const quickActions = useMemo(
     () => [
-      { label: "Help with feature...", prefill: "Help me with the following feature: " },
-      { label: "How do I...", prefill: "How do I: " },
-      { label: "Something's not working", prefill: "Something's not working, here are the details: " },
+      { 
+        label: "Help with feature...", 
+        prefill: "Help me with the following feature: ",
+        icon: (
+          <svg width="1em" height="1em" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H8c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z"/>
+          </svg>
+        )
+      },
+      { 
+        label: "How do I...", 
+        prefill: "How do I: ",
+        icon: (
+          <svg width="1em" height="1em" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/>
+          </svg>
+        )
+      },
+      { 
+        label: "Something's not working", 
+        prefill: "Something's not working, here are the details: ",
+        icon: (
+          <svg width="1em" height="1em" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/>
+          </svg>
+        )
+      },
     ],
     []
   );
@@ -360,92 +390,284 @@ export default function App() {
   }, []);
 
   const handleResponseStart = useCallback(() => {
+    // Prevent multiple calls from resetting state
+    if (responseStartedRef.current && isRespondingRef.current) {
+      if (import.meta.env.DEV) {
+        console.log("[App] handleResponseStart called multiple times, skipping");
+      }
+      return;
+    }
+    responseStartedRef.current = true;
+    
+    // Clear any existing timeouts first
+    progressTimeoutsRef.current.forEach((id) => clearTimeout(id));
+    progressTimeoutsRef.current = [];
+    
+    // Reset response ended flag
+    responseEndedRef.current = false;
+    
     setErrorMessage(null);
     setRouterLog(null);
+    setProgressText(null);
     setAssistantPhase("thinking");
     setIsResponding(true);
+    isRespondingRef.current = true;
+    
+    // Start progress sequence since we can't receive progress_update events via onLog
+    // ChatKit SDK doesn't convert ProgressUpdateEvent to log events
+    // Use shorter delays to ensure updates are visible before response ends
+    const progressSequence = [
+      { delay: 0, text: "Understanding your question...", phase: "thinking" as AssistantPhase },
+      { delay: 300, text: "Analysing...", phase: "thinking" as AssistantPhase },
+      { delay: 700, text: "Reviewing information...", phase: "thinking" as AssistantPhase },
+    ];
+    
+    if (import.meta.env.DEV) {
+      console.log("[App] Starting progress sequence with", progressSequence.length, "updates");
+    }
+    
+    progressSequence.forEach(({ delay, text, phase }, index) => {
+      const timeoutId = window.setTimeout(() => {
+        // Check if we're still responding and haven't ended before updating
+        if (!isRespondingRef.current || responseEndedRef.current) {
+          if (import.meta.env.DEV) {
+            console.log(`[App] Skipping progress update ${index + 1} - response ended or not responding`);
+          }
+          return;
+        }
+        
+        if (import.meta.env.DEV) {
+          console.log(`[App] Progress update ${index + 1}/${progressSequence.length}:`, text);
+        }
+        setProgressText(text);
+        setAssistantPhase(phase);
+      }, delay);
+      progressTimeoutsRef.current.push(timeoutId);
+    });
   }, []);
 
   const handleResponseEnd = useCallback(() => {
-    setAssistantPhase("idle");
-    setIsResponding(false);
+    // Prevent multiple calls from clearing state multiple times
+    if (responseEndedRef.current) {
+      if (import.meta.env.DEV) {
+        console.log("[App] handleResponseEnd called multiple times, skipping");
+      }
+      return;
+    }
+    responseEndedRef.current = true;
+    responseStartedRef.current = false;
+    
+    // Mark as not responding first (so pending timeouts know to skip)
+    isRespondingRef.current = false;
+    
+    // Clear any pending progress timeouts immediately
+    progressTimeoutsRef.current.forEach((id) => clearTimeout(id));
+    progressTimeoutsRef.current = [];
+    
+    // Clear progress state with a small delay to ensure all updates are visible
+    // This prevents clearing progress before the last update can be displayed
+    setTimeout(() => {
+      setProgressText(null);
+      setAssistantPhase("idle");
+      setIsResponding(false);
+      
+      // Trigger button fetch after response ends
+      // This will be handled by the useEffect that watches isResponding
+    }, 100);
+    
+    if (import.meta.env.DEV) {
+      console.log("[App] Response ended, will clear progress state in 100ms");
+    }
   }, []);
 
-  const handleLog = useCallback((detail?: ChatKitLogDetail) => {
-    if (!detail?.name) return;
+  const recoverMissingThread = useCallback(() => {
+    const instance = chatKitRef.current;
+    if (!instance) {
+      return;
+    }
 
-    if (detail.name === "progress_update") {
-      const text =
-        typeof detail.data?.text === "string" ? detail.data.text : "";
-      if (!text) return;
+    threadBootstrapRef.current = true;
+    setIsThreadLoading(true);
+    setContextSynced(false);
+    setContextSyncAttempt(0);
+    setActiveThreadId(null);
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem(THREAD_STORAGE_KEY);
+      }
+    } catch {
+      // ignore storage failures
+    }
 
-                  // Handle user-friendly progress messages
-                  if (text === "analysing...") {
-                    setAssistantPhase("thinking");
-                    return;
-                  }
-                  
-                  if (text === "searching...") {
-                    setAssistantPhase("handoff");
-                    return;
-                  }
-                  
-                  // Handle legacy stage names (shouldn't appear with new code, but keep for compatibility)
-                  if (text.startsWith("cascade.stage ")) {
-                    const stage = text.slice("cascade.stage ".length);
-                    if (stage === "analyzing" || stage === "router_analyzing") {
-                      setAssistantPhase("thinking");
-                    } else if (stage === "heavy_pending") {
-                      setAssistantPhase("handoff");
+    instance
+      .setThreadId(null)
+      .catch((error) => {
+        console.warn("[chatkit] failed to recover missing thread", error);
+      })
+      .finally(() => {
+        threadBootstrapRef.current = false;
+      });
+  }, []);
+
+  const handleLog = useCallback(
+    (detail?: ChatKitLogDetail) => {
+      // Debug: log ALL log events to see what we're receiving
+      if (import.meta.env.DEV) {
+        console.log("[ChatKit] Log event received:", detail);
+      }
+      
+      if (!detail?.name) return;
+
+      if (detail.name === "progress_update") {
+        const text =
+          typeof detail.data?.text === "string" ? detail.data.text : "";
+        if (!text) return;
+
+        // Debug: log progress updates
+        if (import.meta.env.DEV) {
+          console.log("[ChatKit] Progress update:", text);
+        }
+
+        // Store the progress text to display it
+        setProgressText(text);
+
+        // Handle all status messages - update phase based on status text
+        const lowerText = text.toLowerCase();
+        
+        if (lowerText.includes("understanding") || lowerText.includes("analysing") || 
+            lowerText.includes("reviewing information") || lowerText.includes("preparing answer")) {
+          setAssistantPhase("thinking");
+          return;
+        }
+
+        if (lowerText.includes("searching") || lowerText.includes("knowledge base") || 
+            lowerText.includes("reviewing articles") || lowerText.includes("preparing detailed")) {
+          setAssistantPhase("handoff");
+          return;
+        }
+
+        // Fallback to original logic for legacy messages
+        if (text === "analysing..." || text === "Analysing...") {
+          setAssistantPhase("thinking");
+          return;
+        }
+
+        if (text === "searching...") {
+          setAssistantPhase("handoff");
+          return;
+        }
+
+        if (text.startsWith("cascade.stage ")) {
+          const stage = text.slice("cascade.stage ".length);
+          if (stage === "analyzing" || stage === "router_analyzing" || stage === "router_processing" || stage === "router_decided") {
+            setAssistantPhase("thinking");
+          } else if (stage === "heavy_pending" || stage === "heavy_searching" || stage === "heavy_generating") {
+            setAssistantPhase("handoff");
+          }
+          return;
+        }
+
+        if (text.startsWith("cascade.router.decision ")) {
+          const payloadText = text.slice("cascade.router.decision ".length);
+          try {
+            const parsed = JSON.parse(payloadText);
+            const handoff = parsed?.handoff === true;
+            const confidence =
+              typeof parsed?.confidence === "number"
+                ? parsed.confidence
+                : undefined;
+            const reason =
+              typeof parsed?.reason === "string" ? parsed.reason : undefined;
+            const answer =
+              typeof parsed?.answer === "string" ? parsed.answer : undefined;
+
+            setRouterLog({
+              handoff,
+              confidence: confidence ?? null,
+              reason,
+              answer,
+            });
+            
+            // Update progress based on router decision
+            // Clear existing progress timeouts first
+            progressTimeoutsRef.current.forEach((id) => clearTimeout(id));
+            progressTimeoutsRef.current = [];
+            
+            if (handoff) {
+              // Heavy agent will be used - show searching status
+              setAssistantPhase("handoff");
+              const heavyProgressSequence = [
+                { delay: 100, text: "Searching knowledge base..." },
+                { delay: 600, text: "Reviewing articles..." },
+                { delay: 1200, text: "Preparing detailed response..." },
+              ];
+              
+              heavyProgressSequence.forEach(({ delay, text }) => {
+                const timeoutId = window.setTimeout(() => {
+                  // Check if we're still responding before updating
+                  if (!isRespondingRef.current || responseEndedRef.current) {
+                    if (import.meta.env.DEV) {
+                      console.log("[App] Skipping heavy agent progress - response ended");
                     }
                     return;
                   }
-
-      if (text.startsWith("cascade.router.decision ")) {
-        const payloadText = text.slice("cascade.router.decision ".length);
-        try {
-          const parsed = JSON.parse(payloadText);
-          const handoff = parsed?.handoff === true;
-          const confidence =
-            typeof parsed?.confidence === "number"
-              ? parsed.confidence
-              : undefined;
-          const reason =
-            typeof parsed?.reason === "string" ? parsed.reason : undefined;
-          const answer =
-            typeof parsed?.answer === "string" ? parsed.answer : undefined;
-
-          setRouterLog({
-            handoff,
-            confidence: confidence ?? null,
-            reason,
-            answer,
-          });
-          setAssistantPhase(handoff ? "handoff" : "router");
-        } catch {
-          // Ignore malformed payloads.
+                  
+                  if (import.meta.env.DEV) {
+                    console.log("[App] Heavy agent progress:", text);
+                  }
+                  setProgressText(text);
+                }, delay);
+                progressTimeoutsRef.current.push(timeoutId);
+              });
+            } else {
+              // Router answered directly
+              setProgressText("Preparing answer...");
+              setAssistantPhase("router");
+            }
+          } catch {
+            // Ignore malformed payloads.
+          }
+          return;
         }
-        return;
       }
-    }
 
-    if (detail.name === "error") {
-      const message =
-        typeof detail.data?.message === "string"
-          ? detail.data.message
-          : "Unexpected issue while running the cascade.";
-      setErrorMessage(message);
+      if (detail.name === "error") {
+        const fallback = "Unexpected issue while running the cascade.";
+        const message =
+          typeof detail.data?.message === "string"
+            ? detail.data.message
+            : fallback;
+
+        if (isThreadMissingError(message)) {
+          setErrorMessage("Your previous conversation expired; starting a new one now.");
+          recoverMissingThread();
+        } else {
+          setErrorMessage(message);
+        }
+
+        setAssistantPhase("error");
+      }
+    },
+    [recoverMissingThread]
+  );
+
+  const handleError = useCallback(
+    (detail?: { error?: Error }) => {
+      const fallback = "Unexpected error communicating with ChatKit.";
+      const message = detail?.error?.message ?? fallback;
+
+      if (isThreadMissingError(detail?.error ?? message)) {
+        setErrorMessage("Your previous conversation expired; starting a new one now.");
+        recoverMissingThread();
+      } else {
+        setErrorMessage(message);
+      }
+
       setAssistantPhase("error");
-    }
-  }, []);
-
-  const handleError = useCallback((detail?: { error?: Error }) => {
-    setErrorMessage(
-      detail?.error?.message ?? "Unexpected error communicating with ChatKit."
-    );
-    setAssistantPhase("error");
-    setIsResponding(false);
-  }, []);
+      setIsResponding(false);
+    },
+    [recoverMissingThread]
+  );
 
   const handleThreadChange = useCallback(
     ({ threadId }: { threadId: string | null }) => {
@@ -453,6 +675,8 @@ export default function App() {
       setContextSynced(false);
       setContextSyncAttempt(0);
       setIsThreadLoading(false);
+      // Clear buttons when thread changes
+      setMessageButtons(new Map());
       if (typeof window !== "undefined" && contextSyncRetryTimeoutRef.current != null) {
         window.clearTimeout(contextSyncRetryTimeoutRef.current);
         contextSyncRetryTimeoutRef.current = null;
@@ -479,12 +703,11 @@ export default function App() {
     setIsThreadLoading(false);
   }, []);
 
-  const canUploadAttachments = Boolean(activeThreadId) && !isThreadLoading;
-
   const chatKit = useChatKit({
     api: {
       url: chatkitApiUrl,
       domainKey: chatkitDomainKey,
+      uploadStrategy: { type: "two_phase" as const },
     },
     initialThread,
     theme,
@@ -502,6 +725,7 @@ export default function App() {
     onThreadLoadStart: handleThreadLoadStart,
     onThreadLoadEnd: handleThreadLoadEnd,
   });
+  chatKitRef.current = chatKit;
 
   const prefillComposer = useCallback(
     async (text: string) => {
@@ -522,133 +746,95 @@ export default function App() {
     [chatKit, activeThreadId]
   );
 
-  const uploadAttachment = useCallback(
-    async (file: File) => {
-      if (!chatKit || !activeThreadId) {
-        setAttachmentStatus("Start a conversation before uploading attachments.");
+  const handleButtonClick = useCallback(
+    async (buttonValue: string) => {
+      if (!chatKit) {
         return;
       }
 
-      const contentType = file.type || "application/octet-stream";
-      setIsUploadingAttachment(true);
-      setAttachmentStatus(`Uploading ${file.name}...`);
-
       try {
-        const signResponse = await fetch("/api/attachments/sign", {
-          method: "POST",
+        await chatKit.setComposerValue({ text: buttonValue });
+        await chatKit.focusComposer();
+        // Optionally auto-send: await chatKit.sendMessage();
+      } catch (error) {
+        console.warn("[App] Failed to handle button click", error);
+      }
+    },
+    [chatKit]
+  );
+
+  // Effect to fetch buttons from thread messages when response ends
+  useEffect(() => {
+    if (!chatKit?.control || !activeThreadId || !isReady || isResponding) {
+      return;
+    }
+
+    const fetchMessageButtons = async () => {
+      try {
+        if (import.meta.env.DEV) {
+          console.log("[App] Fetching message buttons for thread:", activeThreadId);
+        }
+
+        const response = await fetch(`${chatkitApiUrl}/threads/${activeThreadId}/buttons`, {
+          method: "GET",
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            filename: file.name,
-            contentType,
-            size: file.size,
-            threadId: activeThreadId,
-          }),
         });
 
-        if (!signResponse.ok) {
-          const errorBody = (await signResponse
-            .json()
-            .catch(() => null)) as { error?: string } | null;
-          throw new Error(
-            errorBody?.error ?? "Failed to prepare attachment upload."
-          );
+        if (!response.ok) {
+          if (import.meta.env.DEV) {
+            console.warn("[App] Failed to fetch buttons, status:", response.status);
+          }
+          return;
         }
 
-        const { uploadUrl, assetUrl, key } = await signResponse.json();
-
-        const uploadResponse = await fetch(uploadUrl, {
-          method: "PUT",
-          headers: {
-            "Content-Type": contentType,
-          },
-          body: file,
+        const data = await response.json();
+        const buttonsByMessage = data.buttons || {};
+        
+        if (import.meta.env.DEV) {
+          console.log("[App] Received buttons data:", buttonsByMessage);
+        }
+        
+        const newButtons = new Map<string, Array<{ label: string; value: string }>>();
+        
+        // Sort by message ID (which typically includes timestamp) to get most recent first
+        const sortedEntries = Object.entries(buttonsByMessage).sort(([a], [b]) => {
+          // Compare message IDs - newer messages typically have higher IDs
+          return b.localeCompare(a);
         });
-
-        if (!uploadResponse.ok) {
-          throw new Error("Upload to storage failed. Please retry.");
-        }
-
-        let description: string | null = null;
-        if (contentType.startsWith("image/")) {
-          const describeResponse = await fetch("/api/attachments/describe", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              key,
-              contentType,
-            }),
-          });
-
-          if (describeResponse.ok) {
-            const describePayload = await describeResponse.json();
-            if (typeof describePayload.description === "string") {
-              description = describePayload.description.trim();
+        
+        sortedEntries.forEach(([messageId, buttons]) => {
+          if (Array.isArray(buttons) && buttons.length > 0) {
+            newButtons.set(messageId, buttons);
+            if (import.meta.env.DEV) {
+              console.log(`[App] Found ${buttons.length} buttons for message ${messageId}:`, buttons);
             }
           }
-        }
-
-        await chatKit.sendCustomAction({
-          type: "fyi.cascade.attachment",
-          payload: {
-            attachment: {
-              id: key,
-              name: file.name,
-              mimeType: contentType,
-              size: file.size,
-              url: assetUrl,
-              description,
-              uploadedAt: new Date().toISOString(),
-            },
-          },
         });
 
-        const snippetLines = [
-          `Attachment uploaded: ${file.name} (${contentType})`,
-          `URL: ${assetUrl}`,
-        ];
-        if (description) {
-          snippetLines.push(`Automatic image summary: ${description}`);
+        // Update buttons state
+        if (newButtons.size > 0) {
+          setMessageButtons(newButtons);
+          if (import.meta.env.DEV) {
+            console.log("[App] Updated message buttons:", Array.from(newButtons.entries()));
+          }
+        } else {
+          if (import.meta.env.DEV) {
+            console.log("[App] No buttons found in response");
+          }
         }
-        snippetLines.push(
-          "Reference this attachment in your next question so the assistant can help."
-        );
-
-        await prefillComposer(snippetLines.join("\n"));
-        setAttachmentStatus(
-          "Attachment ready in the composer—review and send your question."
-        );
       } catch (error) {
-        setAttachmentStatus(
-          error instanceof Error ? error.message : "Attachment upload failed."
-        );
-      } finally {
-        setIsUploadingAttachment(false);
+        if (import.meta.env.DEV) {
+          console.warn("[App] Failed to fetch message buttons", error);
+        }
       }
-    },
-    [chatKit, activeThreadId, prefillComposer]
-  );
+    };
 
-  const handleAttachmentInputChange = useCallback(
-    async (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0] ?? null;
-      event.target.value = "";
-      if (!file) {
-        return;
-      }
-      await uploadAttachment(file);
-    },
-    [uploadAttachment]
-  );
-  const triggerAttachmentPicker = useCallback(() => {
-    if (!canUploadAttachments || isUploadingAttachment) {
-      return;
-    }
-    attachmentInputRef.current?.click();
-  }, [canUploadAttachments, isUploadingAttachment]);
+    // Fetch buttons after a short delay to ensure message is saved
+    const timeoutId = setTimeout(fetchMessageButtons, 1500);
+    return () => clearTimeout(timeoutId);
+  }, [chatKit?.control, activeThreadId, isReady, isResponding, chatkitApiUrl]);
 
   useEffect(() => {
     if (initialThread) {
@@ -765,22 +951,6 @@ export default function App() {
     isThreadLoading,
     contextSyncAttempt,
   ]);
-
-  const statusCopy = assistantPhaseCopy[assistantPhase];
-  const statusClass = statusToneClass[assistantPhase];
-  const confidenceLabel = formatConfidence(routerLog?.confidence);
-  const attachmentHelperText = useMemo(() => {
-    if (isUploadingAttachment) {
-      return "Uploading attachment…";
-    }
-    if (attachmentStatus) {
-      return attachmentStatus;
-    }
-    if (!canUploadAttachments) {
-      return "Attachments unlock as soon as the chat is ready.";
-    }
-    return "Attach FYI files or screenshots before you ask.";
-  }, [isUploadingAttachment, attachmentStatus, canUploadAttachments]);
 
   const [chatKitElementDefined, setChatKitElementDefined] = useState(false);
   const [chatSurfaceColor, setChatSurfaceColor] = useState<string | null>(null);
@@ -934,34 +1104,78 @@ export default function App() {
     );
   }
 
+  // Render buttons component
+  const renderMessageButtons = () => {
+    if (messageButtons.size === 0) {
+      if (import.meta.env.DEV) {
+        console.log("[App] No buttons to render, messageButtons.size:", messageButtons.size);
+      }
+      return null;
+    }
+
+    // Get the last message with buttons (most recent)
+    const buttonEntries = Array.from(messageButtons.entries());
+    if (buttonEntries.length === 0) {
+      if (import.meta.env.DEV) {
+        console.log("[App] No button entries found");
+      }
+      return null;
+    }
+
+    // Show buttons for the most recent message
+    const [lastMessageId, buttons] = buttonEntries[buttonEntries.length - 1];
+
+    if (!buttons || buttons.length === 0) {
+      if (import.meta.env.DEV) {
+        console.log("[App] No buttons found for message:", lastMessageId);
+      }
+      return null;
+    }
+
+    if (import.meta.env.DEV) {
+      console.log("[App] Rendering buttons for message:", lastMessageId, "buttons:", buttons);
+    }
+
+    return (
+      <div
+        key={lastMessageId}
+        className="flex flex-wrap items-center justify-start gap-2 px-4 py-3 mt-2"
+        style={{
+          backgroundColor: chatSurfaceColor ?? "var(--chatkit-surface, #f8fafc)",
+          borderTop: "1px solid var(--chatkit-border, #e2e8f0)",
+        }}
+      >
+        {buttons.map((button, index) => (
+          <button
+            key={`${lastMessageId}-${index}`}
+            type="button"
+            onClick={() => {
+              void handleButtonClick(button.value);
+            }}
+            className="inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 hover:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2 active:bg-slate-100"
+            style={{
+              fontFamily: 'var(--font-sans, Inter, ui-sans-serif, system-ui)',
+            }}
+          >
+            {button.label}
+          </button>
+        ))}
+      </div>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-10">
         <section className="relative overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm" style={{ minHeight: "520px" }}>
-          <ChatKit
-            control={chatKit.control}
-            className="block h-[72vh] min-h-[520px] w-full"
-          />
-          <input
-            ref={attachmentInputRef}
-            type="file"
-            onChange={handleAttachmentInputChange}
-            className="sr-only"
-          />
-          <div className="pointer-events-none absolute bottom-6 left-6 flex items-center gap-3">
-            <button
-              type="button"
-              onClick={triggerAttachmentPicker}
-              disabled={!canUploadAttachments || isUploadingAttachment}
-              className={`pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full border text-lg font-semibold shadow-sm transition ${
-                !canUploadAttachments || isUploadingAttachment
-                  ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-                  : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-              }`}
-              aria-label="Attach a file"
-            >
-              +
-            </button>
+          <div className="flex flex-col h-full">
+            <div className="flex-1 overflow-hidden">
+              <ChatKit
+                control={chatKit.control}
+                className="block h-[72vh] min-h-[520px] w-full"
+              />
+            </div>
+            {renderMessageButtons()}
           </div>
         </section>
         {chatKitElementDefined && chatKit?.control && (
@@ -976,12 +1190,21 @@ export default function App() {
                 onClick={() => {
                   void prefillComposer(action.prefill);
                 }}
-                className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-5 py-2 text-sm font-medium text-slate-700 transition hover:bg-white focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2"
+                className="inline-flex items-center gap-3 rounded-full border border-slate-200 bg-slate-50 px-5 py-2 transition hover:bg-white focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2"
+                style={{
+                  fontFamily: 'var(--font-sans, Inter, ui-sans-serif, system-ui)',
+                  fontSize: 'var(--font-text-md-size, 15px)',
+                  lineHeight: 'var(--font-text-md-line-height, 23px)',
+                  fontWeight: 'var(--font-weight-medium, 500)',
+                  color: 'var(--color-text-secondary, hsl(222 22.61% 38.14%))',
+                }}
               >
-                {action.label}
+                <span className="flex-shrink-0" style={{ width: "1em", height: "1em", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                  {action.icon}
+                </span>
+                <span>{action.label}</span>
               </button>
             ))}
-            <p className="mt-1 w-full text-center text-xs text-slate-500">{attachmentHelperText}</p>
           </section>
         )}
       </main>

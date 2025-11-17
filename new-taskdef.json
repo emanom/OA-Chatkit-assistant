@@ -1,0 +1,52 @@
+{
+  "family": "fyi-cascade-task",
+  "taskRoleArn": "arn:aws:iam::831926595680:role/fyi-cascade-task-execution-role",
+  "executionRoleArn": "arn:aws:iam::831926595680:role/fyi-cascade-task-execution-role",
+  "networkMode": "awsvpc",
+  "containerDefinitions": [
+    {
+      "name": "cascade",
+      "image": "831926595680.dkr.ecr.ap-southeast-2.amazonaws.com/fyi-cascade:latest",
+      "cpu": 0,
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "hostPort": 3000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "HEAVY_MAX_OUTPUT_TOKENS", "value": "900" },
+        { "name": "PROMPT_CACHE_ENABLED", "value": "true" },
+        { "name": "ROUTER_REASONING", "value": "low" },
+        { "name": "HEAVY_REASONING", "value": "medium" },
+        { "name": "PORT", "value": "3000" },
+        { "name": "VECTOR_STORE_ID", "value": "vs_68f6372d0fc48191a629f4a6eb0a7806" },
+        { "name": "ROUTER_MODEL", "value": "gpt-5-nano" },
+        { "name": "ROUTER_CONFIDENCE_THRESHOLD", "value": "0.75" }
+      ],
+      "secrets": [
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:ap-southeast-2:831926595680:secret:OPENAI_API_KEY-wAh6ar"
+        },
+        {
+          "name": "OPENAI_DOMAIN_KEY",
+          "valueFrom": "arn:aws:secretsmanager:ap-southeast-2:831926595680:secret:OPENAI_DOMAIN_KEY-zR7LPa"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/fyi-cascade",
+          "awslogs-region": "ap-southeast-2",
+          "awslogs-stream-prefix": "cascade"
+        }
+      }
+    }
+  ],
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048"
+}

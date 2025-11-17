@@ -23,7 +23,7 @@ VECTOR_STORE_ID=vs_68f6372d0fc48191a629f4a6eb0a7806
 # HEAVY_TEMPERATURE=0.2
 # ROUTER_MAX_OUTPUT_TOKENS=400
 # PROMPT_CACHE_ENABLED=true
-# HEAVY_STREAM=false
+# HEAVY_STREAM=true  # Default: enabled for streaming responses
 # HEAVY_MAX_OUTPUT_TOKENS=900
 # HISTORY_MAX_TURNS=4
 # HISTORY_MAX_CHAR_LENGTH=2400
@@ -38,6 +38,21 @@ VECTOR_STORE_ID=vs_68f6372d0fc48191a629f4a6eb0a7806
 # ATTACHMENTS_DOWNLOAD_URL_TTL=604800     # seconds (7 days)
 # IMAGE_DESCRIPTION_MODEL=gpt-4o-mini
 # IMAGE_DESCRIPTION_MAX_OUTPUT_TOKENS=400
+# VITE_ATTACHMENTS_MAX_BYTES=52428800
+# VITE_ATTACHMENTS_MAX_COUNT=4
+
+# Optional article URL validation (prevents hallucinated/invalid links)
+# ARTICLE_VALIDATION_ENABLED=true  # Default: enabled (uses sitemap if Zendesk not configured)
+# ARTICLE_VALIDATION_MAX_RETRIES=1  # Default: 1 retry with feedback when invalid links detected
+# ZENDESK_EMAIL=your-email@example.com  # Optional: Zendesk API email for validation
+# ZENDESK_TOKEN=your-zendesk-api-token     # Optional: Zendesk API token for validation
+
+# Optional Zendesk ticket creation (allows agents to create support tickets)
+# ZENDESK_SUBDOMAIN=your-subdomain  # Your Zendesk subdomain (e.g., 'acme' or 'acme.zendesk.com' - both formats supported)
+# ZENDESK_EMAIL=your-email@example.com  # Zendesk API email (can reuse ARTICLE_VALIDATION email)
+# ZENDESK_API_TOKEN=your-zendesk-api-token  # Zendesk API token (can reuse ARTICLE_VALIDATION token)
+# ZENDESK_ALLOW_PRODUCTION=true  # ONLY set this if you want to allow production ticket creation (NOT recommended)
+#                                 # Default: Production (fyidocs.zendesk.com) is blocked for safety
 ```
 
 `deploy.ps1` automatically resolves `VITE_CHATKIT_DOMAIN_KEY` (defaulting to `domain_pk_6909d8601d648190bb9ddb0da3c031f301049fa90975526f`), exports it for the Vite build, and forwards it to the Docker build so every bundle carries the registered domain key. Override it if you are targeting a different allow-listed hostname.
@@ -53,6 +68,32 @@ npm run demo -- "What is 2+2?"
 
 Omit the trailing question to launch an interactive prompt.
 
+### Testing Zendesk Integration
+
+To test the Zendesk ticket creation functionality:
+
+```bash
+npm run test:zendesk
+```
+
+This will create a test ticket in your Zendesk instance using the credentials from `.env.local`. You can customize the test with command-line options:
+
+```bash
+# Use custom subject and description
+npm run test:zendesk -- --subject "Test Issue" --description "Testing the integration"
+
+# Set priority and type
+npm run test:zendesk -- --priority 3 --type incident
+
+# Include requester information
+npm run test:zendesk -- --requester-email user@example.com --requester-name "John Doe"
+
+# Show help
+npm run test:zendesk -- --help
+```
+
+The script will verify your Zendesk configuration and create a test ticket, displaying the ticket ID and URL upon success.
+
 ### Local web UI
 
 Run the HTTP cascade server and the React/Vite chat client in separate terminals:
@@ -67,13 +108,13 @@ npm run dev             # launches the chat UI at http://localhost:5173
 
 ### Attachments & Amazon S3 uploads
 
-- Users can attach files via the uploader beneath the quick actions panel. Every upload:
-  - Calls `POST /api/attachments/sign` to mint a pre-signed PUT to `s3://pubsupchat-attach/chat-uploads/<thread-id>/…`.
-  - Streams the bytes directly from the browser to S3 (so the ECS task doesn’t proxy large payloads).
-  - Sends a `fyi.cascade.attachment` action so the backend stores attachment metadata alongside the thread.
-- Image attachments trigger `POST /api/attachments/describe`, which signs a short-lived GET URL and asks `IMAGE_DESCRIPTION_MODEL` (default `gpt-4o-mini`) to summarise the picture. The vision summary and S3 link are added to the user context before each cascade run, so both router and heavy agents can reason about the file immediately.
-- Set the `ATTACHMENTS_*` env vars (bucket, prefix, size limit, signed URL TTLs) to match your AWS account. The ECS task role needs `s3:PutObject`/`s3:GetObject` for the configured bucket prefix.
-- Uploaded links are also prefilling the ChatKit composer so the end user can reference or edit the attachment note before sending their question.
+- ChatKit’s **native composer** now exposes the “+” icon automatically (no custom overlay). Enable it by setting the `ATTACHMENTS_*` env vars for the backend plus the optional `VITE_ATTACHMENTS_MAX_BYTES` / `VITE_ATTACHMENTS_MAX_COUNT` build vars if you want a UI cap different from the defaults (50 MB & 4 files).
+- When a user selects a file, ChatKit issues `attachments.create` which is handled by `S3AttachmentStore`. The store:
+  - Generates a safe key under `s3://pubsupchat-attach/chat-uploads/<thread-or-session>/…`.
+  - Returns a presigned PUT so the browser uploads directly to S3 (`two_phase` upload strategy).
+  - Persists attachment metadata (name, MIME type, size, storage key, download URL) in the ChatKit store.
+- Image attachments are re-signed on demand and described automatically via `IMAGE_DESCRIPTION_MODEL`, so every cascade run receives a short summary plus the download link in the user’s message context (no more manual composer prefill).
+- ECS tasks only need `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` on the configured bucket/prefix. All uploads bypass the server, and download URLs are short-lived presigned GETs that the models can follow.
 
 ### Container deployment
 
@@ -105,7 +146,52 @@ docker tag fyi-cascade:latest <account>.dkr.ecr.ap-southeast-2.amazonaws.com/fyi
 docker push <account>.dkr.ecr.ap-southeast-2.amazonaws.com/fyi-cascade:latest
 ```
 
-Deploy the image on AWS ECS/Fargate (Sydney region) behind an Application Load Balancer. Set the container env vars (`OPENAI_API_KEY`, `VECTOR_STORE_ID`, optional overrides) and expose port `3000`. The server automatically serves `dist/` and the cascade API.
+Deploy the image on AWS ECS/Fargate (Sydney region) behind an Application Load Balancer. **Set the container environment variables in your ECS task definition** (`OPENAI_API_KEY`, `VECTOR_STORE_ID`, optional overrides) and expose port `3000`. The server automatically serves `dist/` and the cascade API.
+
+**Important:** Environment variables must be set in the ECS task definition, not in `.env.local` (which is only for local development). For Zendesk ticket creation, ensure you set:
+
+- `ZENDESK_SUBDOMAIN=fyidocs1730787350` (sandbox - **required**)
+- `ZENDESK_EMAIL=your-sandbox-email@example.com`
+- `ZENDESK_API_TOKEN=your-sandbox-api-token`
+- **DO NOT** set `ZENDESK_ALLOW_PRODUCTION` (production tickets are blocked by default for safety)
+
+**How to set environment variables in ECS:**
+
+1. **AWS Console:**
+   
+   **Step 1: Create a new task definition revision with environment variables**
+   - Go to **Amazon ECS** → **Task Definitions** (in the left sidebar, under ECS)
+   - Find and click on your task definition (e.g., `fyi-cascade`)
+   - Click **Create new revision** button
+   - Under **Container definitions**, click on your container name
+   - Scroll down to **Environment variables** section
+   - Click **Add environment variable** and add each variable:
+     - `ZENDESK_SUBDOMAIN` = `fyidocs1730787350`
+     - `ZENDESK_EMAIL` = your sandbox email
+     - `ZENDESK_API_TOKEN` = your sandbox API token
+   - Click **Create** at the bottom to create the new revision
+   
+   **Step 2: Update your service to use the new task definition**
+   - Go to **Clusters** → Select your cluster (e.g., `fyi-cascade-cluster`)
+   - Click on the **Services** tab → Select your service (e.g., `fyi-cascade-svc`)
+   - Click **Update** button (or use "Quick service update")
+   - Under **Task definition**, select the new revision you just created (it should be the latest one)
+   - Click **Update** to deploy the new revision
+
+2. **AWS CLI:**
+   ```bash
+   # Get current task definition
+   aws ecs describe-task-definition --task-definition fyi-cascade --region ap-southeast-2 > task-def.json
+   
+   # Edit task-def.json to add environment variables in containerDefinitions[0].environment
+   # Then register new revision:
+   aws ecs register-task-definition --cli-input-json file://task-def.json --region ap-southeast-2
+   
+   # Update service to use new revision
+   aws ecs update-service --cluster fyi-cascade-cluster --service fyi-cascade-svc --task-definition fyi-cascade --region ap-southeast-2
+   ```
+
+3. **Infrastructure as Code:** Define environment variables in your Terraform/CloudFormation task definition resource
 
 #### Quick redeploy (existing AWS environment)
 
@@ -248,6 +334,46 @@ Each scenario prints per-run latency (router/heavy/total), whether it escalated,
 - **File search not running:** Confirm `VECTOR_STORE_ID` is set and the key has access to the vector store.
 - **Slow responses even for simple questions:** Choose an even smaller router model (e.g., `gpt-4o-mini`) or reduce history you pass in.
 - **Permission errors:** Verify your API key has access to the selected models.
+- **Invalid article links appearing:** Ensure `ARTICLE_VALIDATION_ENABLED` is not set to `false` and check that Zendesk credentials (if provided) are correct.
+
+## Article URL Validation
+
+The chatbot automatically validates article URLs to prevent hallucinated or invalid links from being shown to users. This feature:
+
+- **Validates all article URLs** in responses before they're sent to users
+- **Removes invalid links** automatically, keeping only the link text if available
+- **Uses Zendesk API** if credentials are provided (most reliable)
+- **Falls back to sitemap checking** if Zendesk API is not configured
+- **Caches validation results** to minimize API calls and improve performance
+
+### Configuration
+
+Article validation is **enabled by default**. To configure:
+
+1. **Using Zendesk API (recommended):**
+   ```ini
+   ZENDESK_EMAIL=your-email@example.com
+   ZENDESK_TOKEN=your-zendesk-api-token
+   ```
+   The validator will check articles via Zendesk's API to ensure they exist and are published.
+
+2. **Using sitemap (default fallback):**
+   If Zendesk credentials are not provided, the validator fetches and caches the sitemap from `https://support.fyi.app/sitemap.xml` to validate URLs.
+
+3. **Disable validation:**
+   ```ini
+   ARTICLE_VALIDATION_ENABLED=false
+   ```
+   Note: This is not recommended as it may allow invalid links to be shown to users.
+
+### How It Works
+
+- URLs are extracted from markdown responses (both `[text](url)` links and plain URLs)
+- Each article URL is validated against Zendesk API or sitemap
+- If invalid URLs are detected, the model is asked to regenerate the response with feedback about which links are invalid
+- The model retries with the feedback, ensuring only valid article links are included
+- Results are cached for 1 hour to minimize API calls
+- Maximum retries can be configured via `ARTICLE_VALIDATION_MAX_RETRIES` (default: 1)
 
 Feel free to adapt the FYI prompt, routing thresholds, or vector store configuration to match your specific support workflow.
 

@@ -3,13 +3,21 @@ import cors from "cors";
 import morgan from "morgan";
 import path from "path";
 import fs from "fs";
-import crypto from "crypto";
 import { fileURLToPath } from "url";
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import multer from "multer";
 import { runCascade } from "../src/cascade.js";
-import { openai } from "../src/config.js";
-import { handleChatKitRequest } from "./chatkit.js";
+import { handleChatKitRequest, chatKitStore } from "./chatkit.js";
+import {
+  attachmentsBucket,
+  attachmentsMaxBytes,
+  buildAttachmentKey,
+  describeImageAttachment,
+  signDownloadUrl,
+  signUploadUrl,
+  getPresignedUrlForKey,
+  getPresignedUrlCache,
+  generatePresignedUrlOnDemand,
+} from "./attachments.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "3000", 10);
 const app = express();
@@ -23,6 +31,14 @@ const uiBundleExists = fs.existsSync(indexHtmlPath);
 app.disable("x-powered-by");
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
+
+// Configure multer for file uploads (memory storage)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: attachmentsMaxBytes,
+  },
+});
 app.use(
   morgan(process.env.NODE_ENV === "production" ? "combined" : "dev", {
     skip: () => process.env.MORGAN_DISABLED === "true",
@@ -32,30 +48,6 @@ app.use(
 if (uiBundleExists) {
   app.use(express.static(distPath, { index: false }));
 }
-
-const attachmentsBucket = process.env.ATTACHMENTS_BUCKET ?? "pubsupchat-attach";
-const attachmentsPrefix = process.env.ATTACHMENTS_PREFIX ?? "chat-uploads/";
-const attachmentsMaxBytes = Number.parseInt(
-  process.env.ATTACHMENTS_MAX_BYTES ?? String(50 * 1024 * 1024),
-  10
-);
-const uploadUrlTtlSeconds = Number.parseInt(
-  process.env.ATTACHMENTS_UPLOAD_URL_TTL ?? "300",
-  10
-);
-const downloadUrlTtlSeconds = Number.parseInt(
-  process.env.ATTACHMENTS_DOWNLOAD_URL_TTL ?? String(7 * 24 * 60 * 60),
-  10
-);
-const imageDescriptionModel =
-  process.env.IMAGE_DESCRIPTION_MODEL ?? "gpt-4o-mini";
-const imageDescriptionMaxTokens = Number.parseInt(
-  process.env.IMAGE_DESCRIPTION_MAX_OUTPUT_TOKENS ?? "400",
-  10
-);
-
-const s3Region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "ap-southeast-2";
-const s3 = new S3Client({ region: s3Region });
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", uptime: process.uptime() });
@@ -86,16 +78,124 @@ app.post(
     }
 
     const key = buildAttachmentKey(threadId, filename);
-    const uploadUrl = await signUploadUrl(key, contentType);
+    const uploadData = await signUploadUrl(key, contentType);
     const assetUrl = await signDownloadUrl(key);
+
+    // Handle both old format (string URL) and new format ({ url, fields })
+    const uploadUrl = typeof uploadData === "string" ? uploadData : uploadData.url;
+    const uploadFields = typeof uploadData === "object" && uploadData.fields ? uploadData.fields : null;
 
     sendJson(res, 200, {
       uploadUrl,
+      ...(uploadFields ? { uploadFields } : {}),
       assetUrl,
       key,
       bucket: attachmentsBucket,
       maxBytes: attachmentsMaxBytes,
     });
+  })
+);
+
+app.post(
+  "/api/attachments/upload/:key",
+  upload.single("file"),
+  withErrorHandling(async (req, res) => {
+    try {
+      const { key } = req.params;
+      console.log("[upload-proxy] Received upload request", { key, hasFile: !!req.file });
+      
+      if (!key || typeof key !== "string" || key.trim().length === 0) {
+        sendJson(res, 400, { error: "key is required" });
+        return;
+      }
+
+      const decodedKey = decodeURIComponent(key);
+      console.log("[upload-proxy] Decoded key", { decodedKey });
+      
+      // Get the file from multer first (needed for contentType)
+      const file = req.file;
+      if (!file || !file.buffer) {
+        console.error("[upload-proxy] No file data", { 
+          hasFile: !!file, 
+          hasBuffer: file?.buffer ? true : false,
+          fileSize: file?.size 
+        });
+        sendJson(res, 400, { error: "No file data received" });
+        return;
+      }
+
+      // Get the content type from the cached data or use the file's mimetype
+      const presignedUrlCache = getPresignedUrlCache();
+      const cached = presignedUrlCache?.get(decodedKey);
+      const contentType = cached?.contentType || file.mimetype || "application/octet-stream";
+      
+      // Try to get presigned URL from cache, or generate on-demand
+      let presignedUrl = getPresignedUrlForKey(decodedKey);
+      console.log("[upload-proxy] Presigned URL lookup", { found: !!presignedUrl });
+      
+      if (!presignedUrl) {
+        // Generate presigned URL on-demand if not in cache
+        console.log("[upload-proxy] Generating presigned URL on-demand", { decodedKey, contentType });
+        try {
+          presignedUrl = await generatePresignedUrlOnDemand(decodedKey, contentType);
+          console.log("[upload-proxy] Generated presigned URL", { found: !!presignedUrl });
+        } catch (error) {
+          console.error("[upload-proxy] Failed to generate presigned URL", { 
+            error: error.message,
+            decodedKey,
+            contentType 
+          });
+          sendJson(res, 500, { error: "Failed to generate upload URL", message: error.message });
+          return;
+        }
+      }
+      
+      console.log("[upload-proxy] Uploading to S3", { 
+        key: decodedKey, 
+        contentType, 
+        fileSize: file.buffer.length 
+      });
+
+      // Upload to S3 using the presigned PUT URL
+      const uploadResponse = await fetch(presignedUrl, {
+        method: "PUT",
+        body: file.buffer,
+        headers: {
+          "Content-Type": contentType,
+        },
+      });
+
+      if (!uploadResponse.ok) {
+        const errorText = await uploadResponse.text();
+        console.error("[upload-proxy] S3 upload failed", {
+          status: uploadResponse.status,
+          statusText: uploadResponse.statusText,
+          error: errorText,
+          key: decodedKey,
+        });
+        sendJson(res, uploadResponse.status, { 
+          error: "Failed to upload to S3",
+          details: errorText,
+        });
+        return;
+      }
+
+      // Clean up the cached presigned URL after successful upload
+      const presignedUrlCacheForCleanup = getPresignedUrlCache();
+      if (presignedUrlCacheForCleanup) {
+        presignedUrlCacheForCleanup.delete(decodedKey);
+      }
+
+      console.log("[upload-proxy] Upload successful", { key: decodedKey });
+      res.status(200).json({ success: true, key: decodedKey });
+    } catch (error) {
+      console.error("[upload-proxy] Unexpected error", { 
+        error: error.message, 
+        stack: error.stack,
+        key: req.params?.key 
+      });
+      sendJson(res, 500, { error: "Failed to upload file", message: error.message });
+    }
   })
 );
 
@@ -228,88 +328,6 @@ const sendJson = (res, statusCode, payload) => {
   res.status(statusCode).json(payload);
 };
 
-const buildSafeFilename = (name) => {
-  if (typeof name !== "string" || name.trim().length === 0) {
-    return `file-${crypto.randomUUID()}`;
-  }
-  return name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 200);
-};
-
-const buildAttachmentKey = (threadId, filename) => {
-  const folder = threadId
-    ? `${attachmentsPrefix}${threadId}`
-    : `${attachmentsPrefix}session-${crypto.randomUUID()}`;
-  return `${folder}/${Date.now()}-${buildSafeFilename(filename)}`;
-};
-
-const signUploadUrl = async (key, contentType) => {
-  const command = new PutObjectCommand({
-    Bucket: attachmentsBucket,
-    Key: key,
-    ContentType: contentType,
-  });
-  return getSignedUrl(s3, command, { expiresIn: uploadUrlTtlSeconds });
-};
-
-const signDownloadUrl = async (key, expiresIn = downloadUrlTtlSeconds) => {
-  const command = new GetObjectCommand({
-    Bucket: attachmentsBucket,
-    Key: key,
-  });
-  return getSignedUrl(s3, command, { expiresIn });
-};
-
-const extractOutputText = (response) => {
-  if (!response) return "";
-  if (typeof response.output_text === "string" && response.output_text.length > 0) {
-    return response.output_text;
-  }
-
-  if (Array.isArray(response.output)) {
-    const segments = [];
-    for (const item of response.output) {
-      if (item?.type !== "message" || !Array.isArray(item.content)) continue;
-      for (const content of item.content) {
-        if (content?.type === "output_text" && content.text) {
-          segments.push(content.text);
-        }
-      }
-    }
-    if (segments.length) {
-      return segments.join("");
-    }
-  }
-
-  return "";
-};
-
-const describeImageAttachment = async (key) => {
-  const signedUrl = await signDownloadUrl(key, 120);
-  const response = await openai.responses.create({
-    model: imageDescriptionModel,
-    input: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: "Describe this image in detail so an FYI support agent understands its contents.",
-          },
-          {
-            type: "input_image",
-            image_url: signedUrl,
-          },
-        ],
-      },
-    ],
-    text: {
-      max_output_tokens: imageDescriptionMaxTokens,
-    },
-  });
-
-  return extractOutputText(response).trim();
-};
-
 function withErrorHandling(handler) {
   return async (req, res) => {
     try {
@@ -420,6 +438,54 @@ app.post(
   "/api/chatkit",
   withErrorHandling(async (req, res) => {
     await handleChatKitRequest(req, res);
+  })
+);
+
+// Custom endpoint to fetch message buttons for a thread
+app.get(
+  "/api/chatkit/threads/:threadId/buttons",
+  withErrorHandling(async (req, res) => {
+    const { threadId } = req.params;
+    if (!threadId) {
+      return res.status(400).json({ error: "Thread ID is required" });
+    }
+
+    try {
+      const context = {
+        domainKey: req.get("x-openai-chatkit-domain-key") ?? req.get("x-chatkit-domain-key") ?? null,
+      };
+      
+      // Load thread items (descending order to get most recent first)
+      const page = await chatKitStore.loadThreadItems(threadId, null, 100, "desc", context);
+      const items = page.data || [];
+      
+      console.log(`[server] Loaded ${items.length} items from thread ${threadId}`);
+      
+      // Extract buttons from assistant messages
+      const buttonsByMessage = {};
+      items.forEach((item) => {
+        if (item.type === "assistant_message") {
+          if (item.metadata?.buttons) {
+            const buttons = Array.isArray(item.metadata.buttons) ? item.metadata.buttons : [];
+            if (buttons.length > 0 && item.id) {
+              buttonsByMessage[item.id] = buttons;
+              console.log(`[server] Found ${buttons.length} buttons for message ${item.id}:`, buttons);
+            }
+          } else {
+            // Log all assistant messages to see what metadata they have
+            if (process.env.DEBUG) {
+              console.log(`[server] Message ${item.id} metadata:`, JSON.stringify(item.metadata || {}));
+            }
+          }
+        }
+      });
+
+      console.log(`[server] Returning buttons for ${Object.keys(buttonsByMessage).length} messages`);
+      res.json({ buttons: buttonsByMessage });
+    } catch (error) {
+      console.error("[server] Error fetching message buttons", error);
+      res.status(500).json({ error: "Failed to fetch message buttons" });
+    }
   })
 );
 

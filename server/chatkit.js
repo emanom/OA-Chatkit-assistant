@@ -1,5 +1,6 @@
 import { FyiChatKitServer } from "./chatkitServer.js";
 import { InMemoryChatKitStore } from "./chatkitStore.js";
+import { S3AttachmentStore } from "./s3AttachmentStore.js";
 
 const logger = {
   error: (message, data) => {
@@ -19,7 +20,10 @@ const logger = {
 };
 
 const chatKitStore = new InMemoryChatKitStore();
-const chatKitServer = new FyiChatKitServer(chatKitStore, logger);
+const attachmentStore = new S3AttachmentStore();
+const chatKitServer = new FyiChatKitServer(chatKitStore, attachmentStore, logger);
+
+export { chatKitStore };
 
 const setupSSEKeepAlive = (res, intervalMs = 15000) => {
   const interval = setInterval(() => {
