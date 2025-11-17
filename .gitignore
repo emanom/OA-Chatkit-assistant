@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env.local
+.env.*
+!.env.example
+
+infra/terraform-bin/
+infra/terraform/**/.terraform/
+infra/terraform/**/.terraform.lock.hcl
+
+cert*.pem
+certificate*.pem
+*.pfx
+private-key.*
+exported.*

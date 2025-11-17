@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/FYI_Logo_Colour-450px.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FYI Support Cascade</title>
+    <script>
+      // CRITICAL: Install crypto.randomUUID polyfill IMMEDIATELY in ALL contexts
+      // This must run before ANY other scripts, including ChatKit's async script
+      (function installGlobalRandomUUIDPolyfill() {
+        var createPolyfill = function(cryptoInstance) {
+          var nativeRandomValues = typeof cryptoInstance.getRandomValues === "function" ? cryptoInstance.getRandomValues.bind(cryptoInstance) : null;
+          var fillWithMathRandom = function (buffer) {
+            for (var i = 0; i < buffer.length; i += 1) {
+              buffer[i] = Math.floor(Math.random() * 256);
+            }
+          };
+          var getBytes = function () {
+            var buffer = new Uint8Array(16);
+            if (nativeRandomValues) {
+              nativeRandomValues(buffer);
+            } else {
+              fillWithMathRandom(buffer);
+            }
+            return buffer;
+          };
+          var randomUUID = function () {
+            var bytes = getBytes();
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            var hex = [];
+            for (var i = 0; i < bytes.length; i += 1) {
+              hex.push(bytes[i].toString(16).padStart(2, "0"));
+            }
+            return hex[0] + hex[1] + hex[2] + hex[3] + "-" + hex[4] + hex[5] + "-" + hex[6] + hex[7] + "-" + hex[8] + hex[9] + "-" + hex[10] + hex[11] + hex[12] + hex[13] + hex[14] + hex[15];
+          };
+          return randomUUID;
+        };
+        
+        // Install in all possible global contexts
+        var contexts = [];
+        if (typeof window !== "undefined") contexts.push(window);
+        if (typeof self !== "undefined") contexts.push(self);
+        if (typeof globalThis !== "undefined") contexts.push(globalThis);
+        if (typeof global !== "undefined") contexts.push(global);
+        
+        contexts.forEach(function(ctx) {
+          try {
+            var cryptoObj = ctx.crypto || ctx.msCrypto;
+            if (cryptoObj && typeof cryptoObj.randomUUID !== "function") {
+              var polyfill = createPolyfill(cryptoObj);
+              try {
+                Object.defineProperty(cryptoObj, "randomUUID", {
+                  configurable: true,
+                  enumerable: false,
+                  writable: true,
+                  value: polyfill,
+                });
+              } catch (e) {
+                cryptoObj.randomUUID = polyfill;
+              }
+            }
+          } catch (e) {}
+        });
+        
+        // Also patch WorkerGlobalScope.prototype.crypto IMMEDIATELY
+        if (typeof WorkerGlobalScope !== "undefined") {
+          try {
+            var descriptor = Object.getOwnPropertyDescriptor(WorkerGlobalScope.prototype, "crypto");
+            if (descriptor && typeof descriptor.get === "function") {
+              var originalGetter = descriptor.get;
+              Object.defineProperty(WorkerGlobalScope.prototype, "crypto", {
+                configurable: true,
+                enumerable: descriptor.enumerable,
+                get: function () {
+                  var value = originalGetter.call(this);
+                  if (value && typeof value.randomUUID !== "function") {
+                    var polyfill = createPolyfill(value);
+                    try {
+                      Object.defineProperty(value, "randomUUID", {
+                        configurable: true,
+                        enumerable: false,
+                        writable: true,
+                        value: polyfill,
+                      });
+                    } catch (e) {
+                      value.randomUUID = polyfill;
+                    }
+                  }
+                  return value;
+                },
+              });
+            }
+          } catch (e) {}
+        }
+        
+        console.log("[polyfill] Global crypto.randomUUID polyfill installed in all contexts");
+      })();
+    </script>
+    <script>
+      // CRITICAL: Patch Worker IMMEDIATELY, before any other scripts run
+      // This runs synchronously and patches Worker before ChatKit's async script loads
+      (function patchWorkerImmediately() {
+        if (typeof Worker === "undefined") return;
+        
+        // Capture original Worker from all possible contexts
+        var OriginalWorker = window.Worker || self.Worker || (typeof globalThis !== "undefined" ? globalThis.Worker : null);
+        if (!OriginalWorker) return;
+        
+        // Store original before anything can capture it
+        window.__OriginalWorker = OriginalWorker;
+        self.__OriginalWorker = OriginalWorker;
+        if (typeof globalThis !== "undefined") globalThis.__OriginalWorker = OriginalWorker;
+        
+        // Also store on the Worker constructor itself as a fallback
+        try {
+          OriginalWorker.__OriginalWorker = OriginalWorker;
+        } catch (e) {}
+        
+        console.log("[polyfill] Original Worker stored before any scripts execute");
+      })();
+    </script>
+    <script>
+      (function polyfillRandomUUID() {
+        try {
+          var root =
+            typeof globalThis !== "undefined"
+              ? globalThis
+              : typeof self !== "undefined"
+              ? self
+              : typeof window !== "undefined"
+              ? window
+              : typeof global !== "undefined"
+              ? global
+              : this;
+
+          if (!root) {
+            return;
+          }
+
+          var cryptoObj =
+            root.crypto || root.msCrypto || (root.crypto = Object.create(null));
+
+          if (typeof cryptoObj.randomUUID === "function") {
+            return;
+          }
+
+          var nativeRandomValues =
+            typeof cryptoObj.getRandomValues === "function"
+              ? cryptoObj.getRandomValues.bind(cryptoObj)
+              : null;
+
+          var ensureBuffer = function (buffer) {
+            if (!buffer) {
+              throw new TypeError("Buffer must be provided");
+            }
+            return buffer;
+          };
+
+          var fillWithMathRandom = function (buffer) {
+            buffer = ensureBuffer(buffer);
+            for (var i = 0; i < buffer.length; i += 1) {
+              buffer[i] = Math.floor(Math.random() * 256);
+            }
+            return buffer;
+          };
+
+          var getBytes = function () {
+            var buffer = new Uint8Array(16);
+            if (nativeRandomValues) {
+              nativeRandomValues(buffer);
+            } else {
+              fillWithMathRandom(buffer);
+            }
+            return buffer;
+          };
+
+          var randomUUID = function randomUUID() {
+            var bytes = getBytes();
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            var hex = [];
+            for (var i = 0; i < bytes.length; i += 1) {
+              hex.push(bytes[i].toString(16).padStart(2, "0"));
+            }
+            return (
+              hex[0] +
+              hex[1] +
+              hex[2] +
+              hex[3] +
+              "-" +
+              hex[4] +
+              hex[5] +
+              "-" +
+              hex[6] +
+              hex[7] +
+              "-" +
+              hex[8] +
+              hex[9] +
+              "-" +
+              hex[10] +
+              hex[11] +
+              hex[12] +
+              hex[13] +
+              hex[14] +
+              hex[15]
+            );
+          };
+
+          try {
+            Object.defineProperty(cryptoObj, "randomUUID", {
+              configurable: true,
+              enumerable: false,
+              writable: true,
+              value: randomUUID,
+            });
+          } catch {
+            cryptoObj.randomUUID = randomUUID;
+          }
+
+          if (typeof cryptoObj.randomUUID === "function") {
+            if (typeof console !== "undefined") {
+              console.debug("[polyfill] randomUUID installed");
+            }
+          } else if (typeof console !== "undefined") {
+            console.warn("[polyfill] failed to install randomUUID polyfill");
+          }
+
+          var enhanceWorkerCrypto = function () {
+            if (typeof WorkerGlobalScope === "undefined") {
+              return;
+            }
+
+            // Create polyfill function that can be used in worker contexts
+            var createRandomUUIDPolyfill = function(cryptoInstance) {
+              var nativeRandomValues = typeof cryptoInstance.getRandomValues === "function" ? cryptoInstance.getRandomValues.bind(cryptoInstance) : null;
+              var fillWithMathRandom = function (buffer) {
+                for (var i = 0; i < buffer.length; i += 1) {
+                  buffer[i] = Math.floor(Math.random() * 256);
+                }
+              };
+              var getBytes = function () {
+                var buffer = new Uint8Array(16);
+                if (nativeRandomValues) {
+                  nativeRandomValues(buffer);
+                } else {
+                  fillWithMathRandom(buffer);
+                }
+                return buffer;
+              };
+              var randomUUID = function () {
+                var bytes = getBytes();
+                bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                var hex = [];
+                for (var i = 0; i < bytes.length; i += 1) {
+                  hex.push(bytes[i].toString(16).padStart(2, "0"));
+                }
+                return hex[0] + hex[1] + hex[2] + hex[3] + "-" + hex[4] + hex[5] + "-" + hex[6] + hex[7] + "-" + hex[8] + hex[9] + "-" + hex[10] + hex[11] + hex[12] + hex[13] + hex[14] + hex[15];
+              };
+              return randomUUID;
+            };
+
+            var ensureCrypto = function (scope) {
+              if (!scope) return;
+              var scopeCrypto = scope.crypto;
+              if (!scopeCrypto) {
+                scopeCrypto = {};
+                scope.crypto = scopeCrypto;
+              }
+              if (typeof scopeCrypto.randomUUID !== "function") {
+                var randomUUIDFn = createRandomUUIDPolyfill(scopeCrypto);
+                try {
+                  Object.defineProperty(scopeCrypto, "randomUUID", {
+                    configurable: true,
+                    enumerable: false,
+                    writable: true,
+                    value: randomUUIDFn,
+                  });
+                } catch (e) {
+                  scopeCrypto.randomUUID = randomUUIDFn;
+                }
+              }
+            };
+
+            var descriptor = Object.getOwnPropertyDescriptor(
+              WorkerGlobalScope.prototype,
+              "crypto"
+            );
+
+            if (descriptor && typeof descriptor.get === "function") {
+              var originalGetter = descriptor.get;
+              Object.defineProperty(WorkerGlobalScope.prototype, "crypto", {
+                configurable: true,
+                enumerable: descriptor.enumerable,
+                get: function () {
+                  var value = originalGetter.call(this);
+                  // Ensure the returned crypto object has the polyfill
+                  if (value && typeof value.randomUUID !== "function") {
+                    var randomUUIDFn = createRandomUUIDPolyfill(value);
+                    try {
+                      Object.defineProperty(value, "randomUUID", {
+                        configurable: true,
+                        enumerable: false,
+                        writable: true,
+                        value: randomUUIDFn,
+                      });
+                    } catch (e) {
+                      value.randomUUID = randomUUIDFn;
+                    }
+                  }
+                  ensureCrypto(this);
+                  return value;
+                },
+              });
+            } else {
+              ensureCrypto(WorkerGlobalScope.prototype);
+            }
+          };
+
+          enhanceWorkerCrypto();
+        } catch {
+          // If all else fails, leave the environment untouched.
+        }
+      })();
+    </script>
+    <script>
+      (function ensureWorkerRandomUUID() {
+        console.log("[polyfill] Starting Worker polyfill setup");
+        
+        if (typeof Worker === "undefined") {
+          console.warn("[polyfill] Worker API not available");
+          return;
+        }
+
+        // Use the stored original, or fall back to current Worker
+        // Try multiple fallback strategies to ensure we get the real Worker
+        var OriginalWorker = 
+          window.__OriginalWorker || 
+          self.__OriginalWorker || 
+          (typeof globalThis !== "undefined" ? globalThis.__OriginalWorker : null) ||
+          (typeof Worker !== "undefined" && Worker.__OriginalWorker) ||
+          Worker;
+        var blobUrlCache = new Map();
+        
+        // Worker polyfill code that runs IMMEDIATELY, before ANY other code
+        // NO IIFE wrapper - this code executes immediately when the worker script loads
+        var workerPolyfillSource = [
+          "// CRITICAL: This MUST run before any other code executes - NO IIFE wrapper",
+          "try {",
+          "  var root = typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this);",
+          "  if (root) {",
+          "    var cryptoObj = root.crypto || root.msCrypto || (root.crypto = Object.create(null));",
+          "    if (typeof cryptoObj.randomUUID !== 'function') {",
+          "      var nativeRandomValues = typeof cryptoObj.getRandomValues === 'function' ? cryptoObj.getRandomValues.bind(cryptoObj) : null;",
+          "      var fillWithMathRandom = function (buffer) {",
+          "        for (var i = 0; i < buffer.length; i += 1) {",
+          "          buffer[i] = Math.floor(Math.random() * 256);",
+          "        }",
+          "      };",
+          "      var getBytes = function () {",
+          "        var buffer = new Uint8Array(16);",
+          "        if (nativeRandomValues) {",
+          "          nativeRandomValues(buffer);",
+          "        } else {",
+          "          fillWithMathRandom(buffer);",
+          "        }",
+          "        return buffer;",
+          "      };",
+          "      var randomUUID = function () {",
+          "        var bytes = getBytes();",
+          "        bytes[6] = (bytes[6] & 0x0f) | 0x40;",
+          "        bytes[8] = (bytes[8] & 0x3f) | 0x80;",
+          "        var hex = [];",
+          "        for (var i = 0; i < bytes.length; i += 1) {",
+          "          hex.push(bytes[i].toString(16).padStart(2, '0'));",
+          "        }",
+          "        return hex[0] + hex[1] + hex[2] + hex[3] + '-' + hex[4] + hex[5] + '-' + hex[6] + hex[7] + '-' + hex[8] + hex[9] + '-' + hex[10] + hex[11] + hex[12] + hex[13] + hex[14] + hex[15];",
+          "      };",
+          "      try {",
+          "        Object.defineProperty(cryptoObj, 'randomUUID', {",
+          "          configurable: true,",
+          "          enumerable: false,",
+          "          writable: true,",
+          "          value: randomUUID,",
+          "        });",
+          "      } catch (e) {",
+          "        cryptoObj.randomUUID = randomUUID;",
+          "      }",
+          "    }",
+          "  }",
+          "} catch (error) {",
+          "  console.error('[polyfill-worker] Error installing polyfill:', error);",
+          "}",
+        ].join("\n");
+
+        var buildBlobUrl = function (originalUrl) {
+          if (blobUrlCache.has(originalUrl)) {
+            console.log("[polyfill] Using cached blob URL for:", originalUrl);
+            return blobUrlCache.get(originalUrl);
+          }
+
+          console.log("[polyfill] Creating blob URL for worker:", originalUrl);
+          var blob = new Blob(
+            [
+              workerPolyfillSource,
+              "\n",
+              "importScripts('" + originalUrl.replace(/'/g, "\\'") + "');",
+            ],
+            { type: "application/javascript" }
+          );
+          var blobUrl = URL.createObjectURL(blob);
+          blobUrlCache.set(originalUrl, blobUrl);
+          console.log("[polyfill] Created blob URL:", blobUrl);
+          return blobUrl;
+        };
+
+        var shouldPatch = function (url) {
+          if (typeof url !== "string") {
+            console.log("[polyfill] URL is not a string:", typeof url);
+            return false;
+          }
+          var urlLower = url.toLowerCase();
+          var shouldPatchResult = (
+            urlLower.indexOf("cdn.platform.openai.com") !== -1 ||
+            urlLower.indexOf("cdn.openai.com") !== -1 ||
+            urlLower.indexOf("/assets/ck1/") !== -1 ||
+            urlLower.indexOf("openai.com") !== -1  // Catch all OpenAI URLs
+          );
+          console.log("[polyfill] shouldPatch check for", url, ":", shouldPatchResult);
+          return shouldPatchResult;
+        };
+
+        var resolveUrl = function (url) {
+          if (typeof url !== "string") {
+            return null;
+          }
+          try {
+            var resolved = new URL(url, typeof document !== "undefined" ? document.baseURI : window.location.href).toString();
+            console.log("[polyfill] Resolved URL:", url, "->", resolved);
+            return resolved;
+          } catch (e) {
+            console.log("[polyfill] Failed to resolve URL:", url, e);
+            return null;
+          }
+        };
+
+        var PatchedWorker = function PatchedWorker(url, options) {
+          // Log EVERY Worker creation attempt with full context
+          var stack = new Error().stack;
+          console.log("[polyfill] ===== Worker creation intercepted =====");
+          console.log("[polyfill] URL:", url);
+          console.log("[polyfill] Options:", options);
+          console.log("[polyfill] Stack trace:", stack);
+          
+          var resolved = resolveUrl(url);
+          var urlStr = resolved || String(url);
+          
+          // Patch ALL OpenAI CDN workers
+          var needsPatch = shouldPatch(urlStr);
+          
+          if (needsPatch) {
+            console.log("[polyfill] ✓ Intercepting OpenAI worker, injecting polyfill");
+            try {
+              var blobUrl = buildBlobUrl(resolved || url);
+              var worker = new OriginalWorker(blobUrl, options);
+              console.log("[polyfill] ✓ Worker created successfully with polyfill");
+              return worker;
+            } catch (e) {
+              console.error("[polyfill] ✗ Error creating patched worker:", e);
+              return new OriginalWorker(url, options);
+            }
+          } else {
+            console.log("[polyfill] → Worker created (not OpenAI CDN):", urlStr);
+            return new OriginalWorker(url, options);
+          }
+        };
+
+        // Copy all properties from OriginalWorker
+        PatchedWorker.prototype = OriginalWorker.prototype;
+        try {
+          Object.setPrototypeOf(PatchedWorker, OriginalWorker);
+        } catch (e) {
+          console.warn("[polyfill] Could not set prototype:", e);
+        }
+
+        // Use Proxy to intercept ALL Worker access, including cached references
+        // Make it as aggressive as possible
+        var createWorkerProxy = function() {
+          try {
+            var proxy = new Proxy(PatchedWorker, {
+              construct: function(target, args) {
+                console.log("[polyfill] 🔷 Proxy.construct intercepted with args:", args);
+                return PatchedWorker.apply(null, args);
+              },
+              apply: function(target, thisArg, args) {
+                console.log("[polyfill] 🔷 Proxy.apply intercepted with args:", args);
+                return PatchedWorker.apply(thisArg, args);
+              },
+              get: function(target, prop) {
+                console.log("[polyfill] 🔷 Proxy.get intercepted for property:", prop);
+                return target[prop];
+              }
+            });
+            console.log("[polyfill] Proxy created successfully");
+            return proxy;
+          } catch (e) {
+            console.warn("[polyfill] Proxy not available, using direct patching:", e);
+            return PatchedWorker;
+          }
+        };
+
+        var ProxiedWorker = createWorkerProxy();
+
+        // Patch Worker on all possible global objects using Proxy
+        var patchGlobal = function (globalObj, name) {
+          if (!globalObj || typeof globalObj !== "object") {
+            console.log("[polyfill] Cannot patch", name, "- not an object");
+            return false;
+          }
+          try {
+            // Try to make it non-configurable and non-writable to prevent bypass
+            Object.defineProperty(globalObj, "Worker", {
+              configurable: false,  // Make it non-configurable to prevent bypass
+              enumerable: false,
+              writable: false,
+              value: ProxiedWorker,
+            });
+            console.log("[polyfill] ✓ Successfully patched Worker on", name, "with Proxy (non-configurable)");
+            return true;
+          } catch (e) {
+            try {
+              // Fallback: make it configurable but still use Proxy
+              Object.defineProperty(globalObj, "Worker", {
+                configurable: true,
+                enumerable: false,
+                writable: false,
+                value: ProxiedWorker,
+              });
+              console.log("[polyfill] ✓ Successfully patched Worker on", name, "with Proxy (configurable)");
+              return true;
+            } catch (e2) {
+              try {
+                // Last resort: direct assignment
+                globalObj.Worker = ProxiedWorker;
+                console.log("[polyfill] ✓ Successfully patched Worker on", name, "(direct assignment)");
+                return true;
+              } catch (e3) {
+                console.error("[polyfill] ✗ Failed to patch Worker on", name, ":", e3);
+                return false;
+              }
+            }
+          }
+        };
+
+        // Patch on all possible globals immediately
+        var patched = false;
+        if (typeof window !== "undefined") patched = patchGlobal(window, "window") || patched;
+        if (typeof self !== "undefined") patched = patchGlobal(self, "self") || patched;
+        if (typeof globalThis !== "undefined") patched = patchGlobal(globalThis, "globalThis") || patched;
+        if (typeof global !== "undefined") patched = patchGlobal(global, "global") || patched;
+        
+        // Also patch SharedWorker if it exists (ChatKit might use it)
+        if (typeof SharedWorker !== "undefined") {
+          console.log("[polyfill] SharedWorker detected, patching it too");
+          var OriginalSharedWorker = SharedWorker;
+          var PatchedSharedWorker = function PatchedSharedWorker(url, options) {
+            console.log("[polyfill] PatchedSharedWorker called with URL:", url);
+            var resolved = resolveUrl(url);
+            var urlStr = resolved || String(url);
+            if (shouldPatch(urlStr)) {
+              console.log("[polyfill] Intercepting SharedWorker creation for OpenAI");
+              // For SharedWorker, we'd need a different approach, but let's log it first
+            }
+            return new OriginalSharedWorker(url, options);
+          };
+          PatchedSharedWorker.prototype = OriginalSharedWorker.prototype;
+          try {
+            if (typeof window !== "undefined") window.SharedWorker = PatchedSharedWorker;
+            if (typeof self !== "undefined") self.SharedWorker = PatchedSharedWorker;
+            if (typeof globalThis !== "undefined") globalThis.SharedWorker = PatchedSharedWorker;
+            console.log("[polyfill] SharedWorker patched");
+          } catch (e) {
+            console.warn("[polyfill] Failed to patch SharedWorker:", e);
+          }
+        }
+        
+        if (patched) {
+          console.log("[polyfill] Worker polyfill setup complete");
+        } else {
+          console.error("[polyfill] Worker polyfill setup FAILED - could not patch any global");
+        }
+      })();
+    </script>
+  </head>
+  <body class="bg-slate-50 text-slate-900">
+    <div id="root"></div>
+    <script
+      src="https://cdn.platform.openai.com/deployments/chatkit/chatkit.js"
+      async
+      crossorigin="anonymous"
+    ></script>
+    <script type="module" src="/src/ui/main.tsx"></script>
+  </body>
+</html>
+

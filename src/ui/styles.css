@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light dark;
+}
+
+.cascade-content {
+  line-height: 1.5;
+}
+
+.cascade-content > * {
+  margin: 0;
+  margin-top: 0.2rem;
+}
+
+.cascade-content > *:first-child {
+  margin-top: 0;
+}
+
+.cascade-content p {
+  margin: 0.2rem 0 0 0;
+}
+
+.cascade-content h3,
+.cascade-content h4 {
+  margin-top: 0.6rem;
+  margin-bottom: 0.3rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.cascade-content ul,
+.cascade-content ol {
+  margin-top: 0.3rem;
+  margin-bottom: 0.3rem;
+  padding-left: 1.25rem;
+}
+
+.cascade-content li {
+  margin: 0.14rem 0;
+}
+
+.cascade-content li > ul,
+.cascade-content li > ol {
+  margin-top: 0.14rem;
+  margin-bottom: 0.14rem;
+}
+
+/* User message bubble color - FYI branding blue #003769 */
+/* Target user messages using various possible selectors */
+openai-chatkit [role="user"],
+openai-chatkit [data-role="user"],
+openai-chatkit .user-message,
+openai-chatkit .message[data-role="user"],
+openai-chatkit .thread-item[data-type="user_message"] .content,
+openai-chatkit .thread-item[data-type="user_message"] .bubble {
+  background-color: #003769 !important;
+}
+
+/* More specific selectors for ChatKit's internal structure */
+openai-chatkit .thread-item.user-message,
+openai-chatkit .thread-item[data-item-type="user_message"],
+openai-chatkit .message-bubble.user,
+openai-chatkit .bubble.user {
+  background-color: #003769 !important;
+}
+
+/* Ensure text is readable on dark blue background */
+openai-chatkit [role="user"] *,
+openai-chatkit [data-role="user"] *,
+openai-chatkit .user-message * {
+  color: #ffffff !important;
+}
+
+/* Send button in composer - FYI branding blue #003769 */
+/* Override ChatKit's CSS variables for primary button - must be very specific */
+openai-chatkit,
+openai-chatkit * {
+  --color-background-primary-solid: #003769 !important;
+  --color-background-primary-solid-hover: #002d54 !important;
+  --color-background-primary-solid-active: #001f3d !important;
+  --color-text-primary-solid: #ffffff !important;
+  --button-background-color: #003769 !important;
+  --button-background-color-hover: #002d54 !important;
+  --button-background-color-active: #001f3d !important;
+  --button-text-color: #ffffff !important;
+}
+
+/* Target the specific button class and attributes from ChatKit */
+openai-chatkit button.lkCln[data-variant="solid"][data-color="primary"],
+openai-chatkit button.lkCln[data-variant="solid"][data-color="primary"]:not([disabled]),
+openai-chatkit button[data-variant="solid"][data-color="primary"],
+openai-chatkit button[type="submit"],
+openai-chatkit button[aria-label*="Send"],
+openai-chatkit button[aria-label*="send"],
+openai-chatkit [data-action="send"],
+openai-chatkit .composer button:last-child,
+openai-chatkit form button[type="submit"] {
+  background-color: #003769 !important;
+  background: #003769 !important;
+  border-color: #003769 !important;
+  color: #ffffff !important;
+  --button-background-color: #003769 !important;
+  --button-text-color: #ffffff !important;
+}
+
+openai-chatkit button.lkCln[data-variant="solid"][data-color="primary"]:hover:not([disabled]),
+openai-chatkit button[data-variant="solid"][data-color="primary"]:hover,
+openai-chatkit button[type="submit"]:hover,
+openai-chatkit button[aria-label*="Send"]:hover,
+openai-chatkit button[aria-label*="send"]:hover,
+openai-chatkit [data-action="send"]:hover,
+openai-chatkit .composer button:last-child:hover,
+openai-chatkit form button[type="submit"]:hover {
+  background-color: #002d54 !important;
+  background: #002d54 !important;
+  border-color: #002d54 !important;
+  color: #ffffff !important;
+  --button-background-color-hover: #002d54 !important;
+}
+
