@@ -310,22 +310,28 @@ const describeImageAttachment = async (key) => {
   return extractOutputText(response).trim();
 };
 
-const withErrorHandling = (handler) => async (req, res) => {
-  try {
-    await handler(req, res);
-  } catch (error) {
-    const status = error?.status ?? 500;
-    const message =
-      error?.message ?? "Unexpected error while processing the cascade.";
-    // eslint-disable-next-line no-console
-    console.error("[cascade-server] error", { message, status, stack: error?.stack });
-    if (!res.headersSent) {
-      sendJson(res, status, { error: message });
-    } else {
-      res.end();
+function withErrorHandling(handler) {
+  return async (req, res) => {
+    try {
+      await handler(req, res);
+    } catch (error) {
+      const status = error?.status ?? 500;
+      const message =
+        error?.message ?? "Unexpected error while processing the cascade.";
+      // eslint-disable-next-line no-console
+      console.error("[cascade-server] error", {
+        message,
+        status,
+        stack: error?.stack,
+      });
+      if (!res.headersSent) {
+        sendJson(res, status, { error: message });
+      } else {
+        res.end();
+      }
     }
-  }
-};
+  };
+}
 
 const setupKeepAlive = (res) => {
   const interval = setInterval(() => {
