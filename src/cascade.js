@@ -35,8 +35,7 @@ const BASE_CONFIG = {
   heavyReasoning: process.env.HEAVY_REASONING ?? "medium",
   routerTemperature: parseFloatEnv(process.env.ROUTER_TEMPERATURE),
   routerTopP: parseFloatEnv(process.env.ROUTER_TOP_P),
-  routerMaxOutputTokens:
-    parseNumberEnv(process.env.ROUTER_MAX_OUTPUT_TOKENS) ?? 600,
+  routerMaxOutputTokens: parseNumberEnv(process.env.ROUTER_MAX_OUTPUT_TOKENS),
   heavyTemperature: parseFloatEnv(process.env.HEAVY_TEMPERATURE),
   heavyTopP: parseFloatEnv(process.env.HEAVY_TOP_P),
   heavyMaxOutputTokens: parseNumberEnv(process.env.HEAVY_MAX_OUTPUT_TOKENS) ?? 1200,
