@@ -254,6 +254,8 @@ export default function App() {
   const [isThreadLoading, setIsThreadLoading] = useState(false);
   const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
   const [attachmentStatus, setAttachmentStatus] = useState<string | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const threadBootstrapRef = useRef(false);
   const contextSyncRetryTimeoutRef = useRef<number | null>(null);
 
   const chatkitApiUrl =
@@ -448,12 +450,9 @@ export default function App() {
   const handleThreadChange = useCallback(
     ({ threadId }: { threadId: string | null }) => {
       setActiveThreadId(threadId);
-      // Reset context synced flag when thread changes so we sync context for new threads
-      if (threadId) {
-        setContextSynced(false);
-      }
-      setIsThreadLoading(Boolean(threadId));
+      setContextSynced(false);
       setContextSyncAttempt(0);
+      setIsThreadLoading(false);
       if (typeof window !== "undefined" && contextSyncRetryTimeoutRef.current != null) {
         window.clearTimeout(contextSyncRetryTimeoutRef.current);
         contextSyncRetryTimeoutRef.current = null;
@@ -644,6 +643,38 @@ export default function App() {
     },
     [uploadAttachment]
   );
+  const triggerAttachmentPicker = useCallback(() => {
+    if (!canUploadAttachments || isUploadingAttachment) {
+      return;
+    }
+    attachmentInputRef.current?.click();
+  }, [canUploadAttachments, isUploadingAttachment]);
+
+  useEffect(() => {
+    if (initialThread) {
+      return;
+    }
+    if (!chatKit || !isReady) {
+      return;
+    }
+    if (activeThreadId) {
+      return;
+    }
+    if (threadBootstrapRef.current) {
+      return;
+    }
+    threadBootstrapRef.current = true;
+    setIsThreadLoading(true);
+    chatKit
+      .setThreadId(null)
+      .catch((error) => {
+        console.warn("[chatkit] failed to bootstrap thread", error);
+      })
+      .finally(() => {
+        threadBootstrapRef.current = false;
+      });
+  }, [chatKit, isReady, activeThreadId, initialThread]);
+
 
   useEffect(() => {
     if (typeof window !== "undefined" && contextSyncRetryTimeoutRef.current != null) {
@@ -738,6 +769,18 @@ export default function App() {
   const statusCopy = assistantPhaseCopy[assistantPhase];
   const statusClass = statusToneClass[assistantPhase];
   const confidenceLabel = formatConfidence(routerLog?.confidence);
+  const attachmentHelperText = useMemo(() => {
+    if (isUploadingAttachment) {
+      return "Uploading attachment…";
+    }
+    if (attachmentStatus) {
+      return attachmentStatus;
+    }
+    if (!canUploadAttachments) {
+      return "Attachments unlock as soon as the chat is ready.";
+    }
+    return "Attach FYI files or screenshots before you ask.";
+  }, [isUploadingAttachment, attachmentStatus, canUploadAttachments]);
 
   const [chatKitElementDefined, setChatKitElementDefined] = useState(false);
   const [chatSurfaceColor, setChatSurfaceColor] = useState<string | null>(null);
@@ -894,11 +937,32 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-10">
-        <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm" style={{ minHeight: '520px' }}>
+        <section className="relative overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm" style={{ minHeight: "520px" }}>
           <ChatKit
             control={chatKit.control}
             className="block h-[72vh] min-h-[520px] w-full"
           />
+          <input
+            ref={attachmentInputRef}
+            type="file"
+            onChange={handleAttachmentInputChange}
+            className="sr-only"
+          />
+          <div className="pointer-events-none absolute bottom-6 left-6 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={triggerAttachmentPicker}
+              disabled={!canUploadAttachments || isUploadingAttachment}
+              className={`pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full border text-lg font-semibold shadow-sm transition ${
+                !canUploadAttachments || isUploadingAttachment
+                  ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+                  : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+              }`}
+              aria-label="Attach a file"
+            >
+              +
+            </button>
+          </div>
         </section>
         {chatKitElementDefined && chatKit?.control && (
           <section
@@ -917,33 +981,7 @@ export default function App() {
                 {action.label}
               </button>
             ))}
-            <div className="mt-4 w-full rounded-2xl bg-slate-50/80 p-4 text-left">
-              <label className="block text-sm font-semibold text-slate-700">
-                Upload an attachment
-              </label>
-              <p className="text-xs text-slate-500">
-                Files are stored securely in FYI&rsquo;s S3 bucket so the assistant can reference them.
-              </p>
-              <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-                <input
-                  type="file"
-                  onChange={handleAttachmentInputChange}
-                  disabled={!canUploadAttachments || isUploadingAttachment}
-                  className="text-sm text-slate-700"
-                />
-                {!canUploadAttachments && (
-                  <span className="text-xs text-amber-600">
-                    Attachments become available once the thread is ready.
-                  </span>
-                )}
-                {isUploadingAttachment && (
-                  <span className="text-xs text-slate-500">Uploading…</span>
-                )}
-              </div>
-              {attachmentStatus && (
-                <p className="mt-2 text-xs text-slate-600">{attachmentStatus}</p>
-              )}
-            </div>
+            <p className="mt-1 w-full text-center text-xs text-slate-500">{attachmentHelperText}</p>
           </section>
         )}
       </main>
