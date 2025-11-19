@@ -462,20 +462,97 @@ app.get(
       console.log(`[server] Loaded ${items.length} items from thread ${threadId}`);
       
       // Extract buttons from assistant messages
+      // Try both metadata (if persisted) and content array (widgets)
       const buttonsByMessage = {};
       items.forEach((item) => {
         if (item.type === "assistant_message") {
-          if (item.metadata?.buttons) {
-            const buttons = Array.isArray(item.metadata.buttons) ? item.metadata.buttons : [];
-            if (buttons.length > 0 && item.id) {
-              buttonsByMessage[item.id] = buttons;
-              console.log(`[server] Found ${buttons.length} buttons for message ${item.id}:`, buttons);
+          let buttons = null;
+          
+          // First, try metadata (if persisted)
+          if (item.metadata?.buttons && Array.isArray(item.metadata.buttons)) {
+            buttons = item.metadata.buttons;
+            console.log(`[server] ✓ Found ${buttons.length} buttons in metadata for message ${item.id}`);
+          }
+          
+          // Fallback: extract buttons from content array (annotations or widgets)
+          if (!buttons && Array.isArray(item.content)) {
+            // Filter out invalid content items before processing
+            const validContentItems = item.content.filter(
+              (c) => c && typeof c === "object" && c.type
+            );
+            
+            console.log(`[server] Checking content array for message ${item.id}:`, {
+              contentLength: item.content.length,
+              validContentLength: validContentItems.length,
+              contentTypes: validContentItems.map(c => c.type),
+            });
+            
+            // Try extracting from annotations first (more reliable - stored in output_text)
+            const annotationButtons = [];
+            validContentItems.forEach((contentItem) => {
+              if (contentItem.type === "output_text" && Array.isArray(contentItem.annotations)) {
+                console.log(`[server] Checking annotations for message ${item.id}:`, {
+                  annotationCount: contentItem.annotations.length,
+                  annotations: contentItem.annotations.map(a => ({ type: a.type, name: a.name })),
+                });
+                contentItem.annotations.forEach((annotation, annIndex) => {
+                  console.log(`[server] Annotation ${annIndex}:`, {
+                    type: annotation.type,
+                    name: annotation.name,
+                    hasData: !!annotation.data,
+                    dataIsArray: Array.isArray(annotation.data),
+                    dataLength: Array.isArray(annotation.data) ? annotation.data.length : 0,
+                  });
+                  if (annotation.type === "custom" && annotation.name === "buttons" && Array.isArray(annotation.data)) {
+                    annotationButtons.push(...annotation.data);
+                    console.log(`[server] ✓ Found buttons in annotation ${annIndex}`);
+                  }
+                });
+              } else if (contentItem.type === "output_text") {
+                console.log(`[server] output_text item has no annotations array:`, {
+                  hasAnnotations: !!contentItem.annotations,
+                  annotationsType: typeof contentItem.annotations,
+                });
+              }
+            });
+            
+            if (annotationButtons.length > 0) {
+              buttons = annotationButtons;
+              console.log(`[server] ✓ Extracted ${buttons.length} buttons from annotations for message ${item.id}`);
+            } else {
+              // Fallback: try extracting from widgets
+              const widgetButtons = [];
+              validContentItems.forEach((contentItem, index) => {
+                console.log(`[server] Content item ${index}:`, {
+                  type: contentItem.type,
+                  hasWidget: !!contentItem.widget,
+                  widgetType: contentItem.widget?.type,
+                  widgetLabel: contentItem.widget?.label,
+                  hasAnnotations: !!contentItem.annotations,
+                  annotationCount: Array.isArray(contentItem.annotations) ? contentItem.annotations.length : 0,
+                });
+                
+                if (contentItem.type === "widget" && contentItem.widget?.type === "button") {
+                  widgetButtons.push({
+                    label: contentItem.widget.label || "",
+                    value: contentItem.widget.action?.payload?.value || contentItem.widget.label || "",
+                  });
+                }
+              });
+              if (widgetButtons.length > 0) {
+                buttons = widgetButtons;
+                console.log(`[server] ✓ Extracted ${widgetButtons.length} buttons from content widgets for message ${item.id}`);
+              } else {
+                console.log(`[server] No buttons found in content array (checked annotations and widgets) for message ${item.id}`);
+              }
             }
+          }
+          
+          if (buttons && buttons.length > 0 && item.id) {
+            buttonsByMessage[item.id] = buttons;
+            console.log(`[server] ✓ Storing ${buttons.length} buttons for message ${item.id}`);
           } else {
-            // Log all assistant messages to see what metadata they have
-            if (process.env.DEBUG) {
-              console.log(`[server] Message ${item.id} metadata:`, JSON.stringify(item.metadata || {}));
-            }
+            console.log(`[server] Message ${item.id} has no buttons (checked metadata and content)`);
           }
         }
       });

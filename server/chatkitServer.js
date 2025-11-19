@@ -20,77 +20,115 @@ const joinSegments = (segments) =>
   segments.map(asPlainText).filter(Boolean).join("\n\n");
 
 const buildAssistantContent = (text, buttons = null) => {
+  // Ensure text is a string (default to empty string if undefined/null)
+  const safeText = typeof text === "string" ? text : (text ?? "");
+  
   const content = [
     {
       type: "output_text",
-      text,
+      text: safeText,
       annotations: [],
     },
   ];
   
   // Add button widgets if provided
-  // ChatKit format: send each button as a separate widget content item
-  // Based on ChatKit documentation, widgets use type "widget" with widget structure
+  // Try two approaches:
+  // 1. Add widgets as separate content items (for native ChatKit rendering)
+  // 2. Also store buttons in annotations as fallback (for API retrieval)
   if (Array.isArray(buttons) && buttons.length > 0) {
+    // Approach 1: Add widgets as separate content items
+    // Validate buttons before adding them to prevent undefined/null items
     buttons.forEach((button) => {
-      content.push({
+      // Skip invalid buttons
+      if (!button || typeof button !== "object") {
+        console.warn(`[chatkit] Skipping invalid button:`, button);
+        return;
+      }
+      
+      // Ensure label and value are strings
+      const label = typeof button.label === "string" ? button.label : (button.label ?? "");
+      const value = typeof button.value === "string" ? button.value : (button.value ?? "");
+      
+      // Skip buttons with empty label or value
+      if (!label || !value) {
+        console.warn(`[chatkit] Skipping button with empty label or value:`, { label, value });
+        return;
+      }
+      
+      // Create widget content item with all required properties
+      const widgetItem = {
         type: "widget",
         widget: {
           type: "button",
-          label: button.label,
+          label: label,
           action: {
             type: "fyi.button_click",
             payload: {
-              value: button.value,
+              value: value,
             },
           },
         },
-      });
+      };
+      
+      // Only push if widget item is valid
+      if (widgetItem.type && widgetItem.widget?.type) {
+        content.push(widgetItem);
+      } else {
+        console.warn(`[chatkit] Skipping invalid widget item:`, widgetItem);
+      }
     });
     
-    console.log(`[chatkit] Added ${buttons.length} buttons as widget content items`);
+    // Approach 2: Also store buttons in annotations as fallback
+    // Store buttons as a custom annotation that can be retrieved via API
+    // Filter out invalid buttons before storing
+    const validButtons = buttons.filter(
+      (btn) => btn && typeof btn === "object" && typeof btn.label === "string" && typeof btn.value === "string" && btn.label && btn.value
+    );
+    
+    if (validButtons.length > 0 && content[0] && content[0].annotations) {
+      const buttonAnnotation = {
+        type: "custom",
+        name: "buttons",
+        data: validButtons,
+      };
+      content[0].annotations.push(buttonAnnotation);
+      console.log(`[chatkit] Added buttons to annotations:`, {
+        annotationCount: content[0].annotations.length,
+        annotationType: buttonAnnotation.type,
+        annotationName: buttonAnnotation.name,
+        buttonCount: validButtons.length,
+      });
+    } else if (validButtons.length === 0) {
+      console.warn(`[chatkit] ⚠️ No valid buttons to add to annotations`);
+    } else {
+      console.warn(`[chatkit] ⚠️ Cannot add buttons to annotations - annotations array is missing!`);
+    }
+    
+    console.log(`[chatkit] Added ${validButtons.length} valid buttons as widgets and annotations`);
   }
   
-  return content;
-};
-
-const buildProgressEvent = (text, icon = "sparkle", logger = null) => {
-  // Transform internal stage names to user-friendly messages
-  let displayText = text;
-  if (text === "cascade.stage initial") {
-    displayText = "Understanding your question...";
-  } else if (text === "cascade.stage analyzing") {
-    displayText = "Analysing...";
-  } else if (text === "cascade.stage router_processing") {
-    displayText = "Reviewing information...";
-  } else if (text === "cascade.stage router_decided") {
-    displayText = "Preparing answer...";
-  } else if (text === "cascade.stage heavy_pending") {
-    displayText = "Searching knowledge base...";
-  } else if (text === "cascade.stage heavy_searching") {
-    displayText = "Reviewing articles...";
-  } else if (text === "cascade.stage heavy_generating") {
-    displayText = "Preparing detailed response...";
-  } else if (text === "cascade.stage router_complete" || text === "cascade.stage complete") {
-    // Don't show a progress update for completion - it's handled by the response
-    return null;
-  } else if (text.startsWith("cascade.stage ")) {
-    displayText = text.slice("cascade.stage ".length);
+  // Final safety check: filter out any content items that don't have a type property
+  const filteredContent = content.filter((item) => {
+    if (!item || typeof item !== "object" || !item.type) {
+      console.warn(`[chatkit] Filtering out invalid content item:`, item);
+      return false;
+    }
+    return true;
+  });
+  
+  // Ensure we always return at least one valid content item
+  if (filteredContent.length === 0) {
+    console.warn(`[chatkit] No valid content items, returning default text content`);
+    return [
+      {
+        type: "output_text",
+        text: safeText,
+        annotations: [],
+      },
+    ];
   }
   
-  // Return null for stages that shouldn't show progress updates
-  if (!displayText || displayText === text) {
-    return null;
-  }
-  
-  // ChatKit SDK doesn't automatically convert ProgressUpdateEvent to log events
-  // The progress_update events are valid ThreadStreamEvents but won't trigger onLog callback
-  // We need to find another way to communicate progress to the UI
-  return {
-    type: "progress_update",
-    text: displayText,
-    icon,
-  };
+  return filteredContent;
 };
 
 const formatBytes = (bytes) => {
@@ -295,30 +333,6 @@ export class FyiChatKitServer extends ChatKitServer {
           }
         : baseCascadeContext;
 
-    // Emit initial progress
-    const initialEvent = buildProgressEvent("cascade.stage initial", "sparkle", this.logger);
-    if (initialEvent) {
-      yield initialEvent;
-    }
-    
-    // Delay to ensure first update is visible
-    await new Promise(resolve => setTimeout(resolve, 200));
-    
-    // Emit analyzing progress
-    const analyzingEvent = buildProgressEvent("cascade.stage analyzing", "sparkle", this.logger);
-    if (analyzingEvent) {
-      yield analyzingEvent;
-    }
-    
-    // Delay to ensure second update is visible
-    await new Promise(resolve => setTimeout(resolve, 300));
-    
-    // Emit reviewing progress
-    const reviewingEvent = buildProgressEvent("cascade.stage router_processing", "sparkle", this.logger);
-    if (reviewingEvent) {
-      yield reviewingEvent;
-    }
-
     let resolveRouterDecision;
     const routerDecisionPromise = new Promise((resolve) => {
       resolveRouterDecision = resolve;
@@ -327,13 +341,6 @@ export class FyiChatKitServer extends ChatKitServer {
     let interimAssistantItem = null;
     let streamingAssistantItem = null;
     let streamingText = "";
-    
-    // Queue for progress updates that need to be emitted
-    const progressQueue = [];
-    let progressResolver = null;
-    const progressPromise = new Promise((resolve) => {
-      progressResolver = resolve;
-    });
 
     // Extract image URLs from attachments for visual analysis
     const imageUrls = [];
@@ -365,15 +372,7 @@ export class FyiChatKitServer extends ChatKitServer {
         resolveRouterDecision(payload);
       },
       onProgress: (stage) => {
-        // Queue progress updates to be emitted
-        const progressEvent = buildProgressEvent(stage);
-        if (progressEvent) {
-          progressQueue.push(progressEvent);
-          if (progressResolver) {
-            progressResolver();
-            progressResolver = null;
-          }
-        }
+        this.logger?.debug?.("[cascade] progress update", { stage });
       },
       onStreamDelta: (delta) => {
         // Stream deltas to ChatKit as they arrive
@@ -435,44 +434,10 @@ export class FyiChatKitServer extends ChatKitServer {
           },
         };
 
-        const decisionLog = {
-          handoff: decision.handoff,
-          confidence: decision.confidence ?? null,
-          reason: decision.reason ?? null,
-          answer: decision.answer ?? null,
-        };
-        const decisionEvent = buildProgressEvent(
-          `cascade.router.decision ${JSON.stringify(decisionLog)}`
-        );
-        if (decisionEvent) {
-          yield decisionEvent;
-        }
-
         yield {
           type: "thread.item.done",
-          item: interimAssistantItem,
+          item: this.safeSerializeItem(interimAssistantItem),
         };
-
-        // Emit progress updates for heavy agent stages
-        const heavyPendingEvent =
-          buildProgressEvent("cascade.stage heavy_pending", "sparkle", this.logger);
-        if (heavyPendingEvent) {
-          yield heavyPendingEvent;
-        }
-        
-        // Add a small delay and show searching status
-        await new Promise(resolve => setTimeout(resolve, 200));
-        const searchingEvent = buildProgressEvent("cascade.stage heavy_searching", "sparkle", this.logger);
-        if (searchingEvent) {
-          yield searchingEvent;
-        }
-        
-        // Add another delay and show generating status
-        await new Promise(resolve => setTimeout(resolve, 300));
-        const generatingEvent = buildProgressEvent("cascade.stage heavy_generating", "sparkle", this.logger);
-        if (generatingEvent) {
-          yield generatingEvent;
-        }
 
         // Create streaming assistant item for heavy agent response
         // Preserve buttons from interim item if they exist
@@ -491,55 +456,116 @@ export class FyiChatKitServer extends ChatKitServer {
         // Yield the initial streaming item (will replace interim item)
         yield {
           type: "thread.item.replaced",
-          item: streamingAssistantItem,
+          item: this.safeSerializeItem(streamingAssistantItem),
         };
 
-        const finalResult = await cascadePromise;
+        let finalResult;
+        try {
+          finalResult = await cascadePromise;
+        } catch (cascadeError) {
+          console.error("[chatkit] ✗✗✗ CASCADE PROMISE FAILED ✗✗✗", {
+            error: cascadeError.message,
+            stack: cascadeError.stack,
+            name: cascadeError.name,
+            fullError: JSON.stringify(cascadeError, Object.getOwnPropertyNames(cascadeError)),
+          });
+          throw cascadeError;
+        }
         
-        console.log("[chatkit] Final result buttons:", finalResult.buttons);
+        console.log("[chatkit] Final result buttons:", finalResult?.buttons);
+        console.log("[chatkit] Final result details:", {
+          hasResult: !!finalResult,
+          source: finalResult?.source,
+          hasAnswer: !!finalResult?.answer,
+          answerLength: finalResult?.answer?.length,
+          hasButtons: !!finalResult?.buttons,
+          buttonsCount: Array.isArray(finalResult?.buttons) ? finalResult.buttons.length : 0,
+        });
         
         // If streaming was enabled and we have accumulated text, use it
         if (streamingText && streamingAssistantItem) {
-          const finalText = this.formatTextForChatKit(finalResult.answer ?? streamingText);
-          const buttonsToUse = finalResult.buttons || streamingAssistantItem?.metadata?.buttons || null;
-          console.log("[chatkit] Using buttons for final streaming item:", buttonsToUse);
-          const finalItem = this.buildAssistantMessageItem(
-            thread,
-            finalText,
-            context,
-            {
-              id: streamingAssistantItem.id,
-              created_at: streamingAssistantItem.created_at,
-              buttons: buttonsToUse,
+          try {
+            const finalText = this.formatTextForChatKit(finalResult.answer ?? streamingText);
+            const buttonsToUse = finalResult.buttons || streamingAssistantItem?.metadata?.buttons || null;
+            console.log("[chatkit] Using buttons for final streaming item:", buttonsToUse);
+            const finalItem = this.buildAssistantMessageItem(
+              thread,
+              finalText,
+              context,
+              {
+                id: streamingAssistantItem.id,
+                created_at: streamingAssistantItem.created_at,
+                buttons: buttonsToUse,
+              }
+            );
+            
+            // Validate item before yielding
+            if (!finalItem || !finalItem.type || !finalItem.id) {
+              throw new Error("Invalid final item generated");
             }
-          );
-          
-          yield {
-            type: "thread.item.replaced",
-            item: finalItem,
-          };
+            
+            // Safely serialize before yielding
+            const safeFinalItem = this.safeSerializeItem(finalItem);
+            
+            yield {
+              type: "thread.item.replaced",
+              item: safeFinalItem,
+            };
+          } catch (streamError) {
+            this.logger?.error?.("[chatkit] Error yielding final streaming item", {
+              error: streamError.message,
+              stack: streamError.stack,
+            });
+            // Fall back to emitFinalAssistantMessage
+            yield* this.emitFinalAssistantMessage({
+              thread,
+              context,
+              result: finalResult,
+              replaceId: interimAssistantItem?.id,
+              originalCreatedAt: interimAssistantItem?.created_at,
+              originalQuestion: question,
+              originalHistory: history,
+              originalContext: cascadeContext,
+            });
+          }
         } else {
+          try {
+            yield* this.emitFinalAssistantMessage({
+              thread,
+              context,
+              result: finalResult,
+              replaceId: interimAssistantItem?.id,
+              originalCreatedAt: interimAssistantItem?.created_at,
+              originalQuestion: question,
+              originalHistory: history,
+              originalContext: cascadeContext,
+            });
+          } catch (emitError) {
+            this.logger?.error?.("[chatkit] Error emitting final assistant message", {
+              error: emitError.message,
+              stack: emitError.stack,
+            });
+            yield this.toErrorEvent(emitError);
+          }
+        }
+      } else {
+        const { result } = firstResult;
+        try {
           yield* this.emitFinalAssistantMessage({
             thread,
             context,
-            result: finalResult,
-            replaceId: interimAssistantItem?.id,
-            originalCreatedAt: interimAssistantItem?.created_at,
+            result,
             originalQuestion: question,
             originalHistory: history,
             originalContext: cascadeContext,
           });
+        } catch (emitError) {
+          this.logger?.error?.("[chatkit] Error emitting final assistant message (router path)", {
+            error: emitError.message,
+            stack: emitError.stack,
+          });
+          yield this.toErrorEvent(emitError);
         }
-      } else {
-        const { result } = firstResult;
-        yield* this.emitFinalAssistantMessage({
-          thread,
-          context,
-          result,
-          originalQuestion: question,
-          originalHistory: history,
-          originalContext: cascadeContext,
-        });
       }
     } catch (error) {
       yield this.toErrorEvent(error);
@@ -592,7 +618,7 @@ export class FyiChatKitServer extends ChatKitServer {
         
         yield {
           type: "thread.item.done",
-          item: userMessage,
+          item: this.safeSerializeItem(userMessage),
         };
         
         // Trigger a response by calling respond() with the new user message
@@ -610,6 +636,7 @@ export class FyiChatKitServer extends ChatKitServer {
 
   extractUserMessageText(userMessage) {
     const segments = (userMessage.content ?? [])
+      .filter((part) => part && typeof part === "object" && part.type) // Filter out invalid parts
       .map((part) => {
         if (part.type === "input_text") return part.text ?? "";
         if (part.type === "input_tag") return part.text ?? "";
@@ -621,6 +648,7 @@ export class FyiChatKitServer extends ChatKitServer {
 
   extractAssistantMessageText(assistantMessage) {
     const segments = (assistantMessage.content ?? [])
+      .filter((part) => part && typeof part === "object" && part.type) // Filter out invalid parts
       .map((part) => {
         if (part.type === "output_text") return part.text ?? "";
         return "";
@@ -843,11 +871,26 @@ export class FyiChatKitServer extends ChatKitServer {
       
       // Retry cascade with feedback
       try {
+        console.log("[chatkit] Retrying cascade with feedback", {
+          retryCount: retryCount + 1,
+          maxRetries,
+          invalidUrlCount: invalidUrls.length,
+          hasOriginalQuestion: !!originalQuestion,
+          hasOriginalHistory: !!originalHistory,
+          historyLength: originalHistory?.length,
+        });
+        
         const retryResult = await runCascade({
           question: originalQuestion,
           history: retryHistory,
           context: originalContext,
-          config: result.config,
+          config: result?.config || undefined, // Safely pass config if available
+        });
+        
+        console.log("[chatkit] Retry cascade completed successfully", {
+          hasResult: !!retryResult,
+          hasAnswer: !!retryResult?.answer,
+          answerLength: retryResult?.answer?.length,
         });
         
         // Recursively call emitFinalAssistantMessage with retry count
@@ -864,8 +907,18 @@ export class FyiChatKitServer extends ChatKitServer {
         });
         return;
       } catch (retryError) {
+        console.error("[chatkit] ✗✗✗ FAILED TO RETRY CASCADE WITH FEEDBACK ✗✗✗", {
+          error: retryError.message,
+          stack: retryError.stack,
+          name: retryError.name,
+          retryCount: retryCount + 1,
+          hasOriginalQuestion: !!originalQuestion,
+          hasOriginalHistory: !!originalHistory,
+          fullError: JSON.stringify(retryError, Object.getOwnPropertyNames(retryError)),
+        });
         this.logger?.warn?.("[chatkit] Failed to retry cascade with feedback", {
           error: retryError.message,
+          stack: retryError.stack,
         });
         // Fall through to use original response
       }
@@ -877,28 +930,68 @@ export class FyiChatKitServer extends ChatKitServer {
       buttons: result.buttons || null,
     });
 
-    for (const event of this.emitMetadataProgress(result)) {
-      yield event;
+    // Validate assistantItem before yielding
+    if (!assistantItem || !assistantItem.type || !assistantItem.id) {
+      this.logger?.error?.("[chatkit] Invalid assistant item generated", {
+        hasItem: !!assistantItem,
+        itemType: assistantItem?.type,
+        itemId: assistantItem?.id,
+      });
+      yield this.toErrorEvent(new Error("Failed to generate valid assistant message"));
+      return;
     }
 
-    if (replaceId) {
-      yield {
-        type: "thread.item.replaced",
-        item: assistantItem,
-      };
-    } else {
-      yield {
-        type: "thread.item.done",
-        item: assistantItem,
-      };
+    // Validate content array
+    if (!Array.isArray(assistantItem.content) || assistantItem.content.length === 0) {
+      this.logger?.error?.("[chatkit] Assistant item has invalid content array", {
+        itemId: assistantItem.id,
+        contentType: typeof assistantItem.content,
+        contentLength: Array.isArray(assistantItem.content) ? assistantItem.content.length : 0,
+      });
+      yield this.toErrorEvent(new Error("Failed to generate valid message content"));
+      return;
     }
 
-    yield {
-      type: "thread.item.done",
-      item: this.createEndOfTurnItem(thread, context),
-    };
+      try {
+        for (const event of this.emitMetadataProgress(result)) {
+          yield event;
+        }
 
-    this.applyFinalMetadata(thread, result);
+        // Safely serialize items before yielding
+        const safeAssistantItem = this.safeSerializeItem(assistantItem);
+
+        if (replaceId) {
+          yield {
+            type: "thread.item.replaced",
+            item: safeAssistantItem,
+          };
+        } else {
+          yield {
+            type: "thread.item.done",
+            item: safeAssistantItem,
+          };
+        }
+
+        const endOfTurnItem = this.createEndOfTurnItem(thread, context);
+        if (endOfTurnItem && endOfTurnItem.type && endOfTurnItem.id) {
+          const safeEndOfTurnItem = this.safeSerializeItem(endOfTurnItem);
+          yield {
+            type: "thread.item.done",
+            item: safeEndOfTurnItem,
+          };
+        } else {
+          this.logger?.warn?.("[chatkit] Invalid end of turn item generated");
+        }
+
+        this.applyFinalMetadata(thread, result);
+      } catch (yieldError) {
+        this.logger?.error?.("[chatkit] Error yielding final assistant message", {
+          error: yieldError.message,
+          stack: yieldError.stack,
+          itemId: assistantItem.id,
+        });
+        yield this.toErrorEvent(yieldError);
+      }
   }
 
   toErrorEvent(error) {
@@ -916,6 +1009,167 @@ export class FyiChatKitServer extends ChatKitServer {
         error instanceof Error ? error.message : "Unexpected cascade failure.",
       allow_retry: true,
     };
+  }
+
+  // Helper to safely serialize items before yielding
+  // This helps catch serialization errors early and ensures content arrays are valid
+  safeSerializeItem(item) {
+    if (!item || typeof item !== "object") {
+      this.logger?.error?.("[chatkit] Invalid item passed to safeSerializeItem", { item });
+      return {
+        type: "assistant_message",
+        id: "error",
+        thread_id: "",
+        created_at: new Date().toISOString(),
+        content: [
+          {
+            type: "output_text",
+            text: "An error occurred while generating the response. Please try again.",
+            annotations: [],
+          },
+        ],
+      };
+    }
+
+    // Deep clone to avoid mutating the original
+    // Use a safe cloning approach that handles circular references
+    let cleanedItem;
+    try {
+      cleanedItem = JSON.parse(JSON.stringify(item));
+    } catch (cloneError) {
+      // If cloning fails (e.g., circular reference), create a shallow copy and manually clone content
+      this.logger?.warn?.("[chatkit] Failed to deep clone item, using shallow copy", {
+        error: cloneError.message,
+        itemId: item.id,
+      });
+      cleanedItem = {
+        type: item.type,
+        id: item.id,
+        thread_id: item.thread_id,
+        created_at: item.created_at,
+        content: Array.isArray(item.content) ? [...item.content] : undefined,
+        metadata: item.metadata ? { ...item.metadata } : undefined,
+      };
+    }
+
+    // Validate and clean content array
+    if (Array.isArray(cleanedItem.content)) {
+      cleanedItem.content = cleanedItem.content.filter((contentItem) => {
+        // Filter out null, undefined, or invalid content items
+        if (!contentItem || typeof contentItem !== "object") {
+          this.logger?.warn?.("[chatkit] Filtering out invalid content item in safeSerializeItem", {
+            itemId: cleanedItem.id,
+            contentItem,
+          });
+          return false;
+        }
+        
+        // Ensure content item has a type property
+        if (!contentItem.type || typeof contentItem.type !== "string") {
+          this.logger?.warn?.("[chatkit] Filtering out content item without type", {
+            itemId: cleanedItem.id,
+            contentItem,
+          });
+          return false;
+        }
+
+        // Validate annotations if present
+        if (Array.isArray(contentItem.annotations)) {
+          contentItem.annotations = contentItem.annotations.filter((ann) => {
+            if (!ann || typeof ann !== "object" || !ann.type) {
+              this.logger?.warn?.("[chatkit] Filtering out invalid annotation", {
+                itemId: cleanedItem.id,
+                annotation: ann,
+              });
+              return false;
+            }
+            return true;
+          });
+        }
+
+        return true;
+      });
+
+      // Ensure at least one valid content item exists
+      if (cleanedItem.content.length === 0) {
+        this.logger?.warn?.("[chatkit] No valid content items after filtering, adding default", {
+          itemId: cleanedItem.id,
+        });
+        // Try to preserve original text if available (before filtering)
+        const originalText = Array.isArray(item.content) && item.content.length > 0 
+          ? (item.content[0]?.text || "Response generated successfully.")
+          : "Response generated successfully.";
+        cleanedItem.content = [
+          {
+            type: "output_text",
+            text: originalText,
+            annotations: [],
+          },
+        ];
+      }
+    } else if (cleanedItem.content !== undefined) {
+      // Content exists but is not an array - replace with valid array
+      this.logger?.warn?.("[chatkit] Content is not an array, replacing with valid array", {
+        itemId: cleanedItem.id,
+        contentType: typeof cleanedItem.content,
+      });
+      cleanedItem.content = [
+        {
+          type: "output_text",
+          text: typeof cleanedItem.content === "string" ? cleanedItem.content : "Response generated successfully.",
+          annotations: [],
+        },
+      ];
+    } else {
+      // No content array at all - add default
+      this.logger?.warn?.("[chatkit] No content array found, adding default", {
+        itemId: cleanedItem.id,
+      });
+      cleanedItem.content = [
+        {
+          type: "output_text",
+          text: "Response generated successfully.",
+          annotations: [],
+        },
+      ];
+    }
+
+    // Validate required fields
+    if (!cleanedItem.type || typeof cleanedItem.type !== "string") {
+      this.logger?.error?.("[chatkit] Item missing type field", { itemId: cleanedItem.id });
+      cleanedItem.type = cleanedItem.type || "assistant_message";
+    }
+
+    if (!cleanedItem.id || typeof cleanedItem.id !== "string") {
+      this.logger?.error?.("[chatkit] Item missing id field", { item });
+      cleanedItem.id = cleanedItem.id || "error";
+    }
+
+    try {
+      // Try to serialize to catch any remaining circular references or invalid data
+      JSON.stringify(cleanedItem);
+      return cleanedItem;
+    } catch (serializeError) {
+      this.logger?.error?.("[chatkit] Failed to serialize cleaned item", {
+        error: serializeError.message,
+        itemType: cleanedItem.type,
+        itemId: cleanedItem.id,
+      });
+      // Return a minimal valid item structure
+      return {
+        type: cleanedItem.type || "assistant_message",
+        id: cleanedItem.id || "error",
+        thread_id: cleanedItem.thread_id || "",
+        created_at: cleanedItem.created_at || new Date().toISOString(),
+        content: [
+          {
+            type: "output_text",
+            text: "An error occurred while generating the response. Please try again.",
+            annotations: [],
+          },
+        ],
+      };
+    }
   }
 }
 

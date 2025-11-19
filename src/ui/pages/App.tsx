@@ -5,6 +5,16 @@ const THREAD_STORAGE_KEY = "fyi-chatkit:last-thread";
 const MAX_CONTEXT_SYNC_ATTEMPTS = 5;
 const CONTEXT_SYNC_BASE_DELAY_MS = 250;
 const isThreadMissingError = (value: unknown) => {
+  let code: string | null = null;
+  if (
+    value &&
+    typeof value === "object" &&
+    "code" in value &&
+    typeof (value as { code?: unknown }).code === "string"
+  ) {
+    code = ((value as { code?: string }).code as string).toLowerCase();
+  }
+
   const message =
     typeof value === "string"
       ? value
@@ -16,11 +26,27 @@ const isThreadMissingError = (value: unknown) => {
         typeof (value as { message?: unknown }).message === "string"
       ? ((value as { message?: string }).message as string)
       : "";
-  if (!message) {
-    return false;
-  }
+
   const normalized = message.toLowerCase();
-  return normalized.includes("thread") && normalized.includes("not found");
+  if (normalized.includes("thread") && normalized.includes("not found")) {
+    return true;
+  }
+  if (normalized.includes("thread may have been lost")) {
+    return true;
+  }
+  if (normalized.includes("thread") && normalized.includes("lost due to server restart")) {
+    return true;
+  }
+  if (
+    code &&
+    (code === "thread_not_found" ||
+      code === "thread.not_found" ||
+      code === "thread_lost" ||
+      code === "thread_missing")
+  ) {
+    return true;
+  }
+  return false;
 };
 const ATTACHMENTS_MAX_BYTES = Number.parseInt(
   import.meta.env.VITE_ATTACHMENTS_MAX_BYTES ?? String(50 * 1024 * 1024),

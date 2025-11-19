@@ -8,7 +8,7 @@
  */
 
 const SUPPORT_FYI_DOMAIN = "support.fyi.app";
-const SITEMAP_URL = `https://${SUPPORT_FYI_DOMAIN}/sitemap.xml`;
+const SITEMAP_URL = `https://${SUPPORT_FYI_DOMAIN}/hc/sitemap.xml`;
 const ZENDESK_API_BASE = `https://${SUPPORT_FYI_DOMAIN}/api/v2`;
 
 // Cache for validated URLs to avoid repeated API calls

@@ -1,5 +1,49 @@
 locals {
-  cluster_name = var.cluster_name != "" ? var.cluster_name : "${var.name}-cluster"
+  cluster_name           = var.cluster_name != "" ? var.cluster_name : "${var.name}-cluster"
+  attachments_bucket_arn = var.attachments_bucket_name != "" ? "arn:aws:s3:::${var.attachments_bucket_name}" : ""
+}
+
+locals {
+  task_policy_statements = concat(
+    var.chatkit_store_table_arn != "" ? [
+      {
+        Sid    = "DynamoAccess"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:BatchWriteItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable",
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:Query",
+          "dynamodb:Scan",
+          "dynamodb:UpdateItem",
+        ]
+        Resource = [
+          var.chatkit_store_table_arn,
+          "${var.chatkit_store_table_arn}/index/*",
+        ]
+      }
+    ] : [],
+    local.attachments_bucket_arn != "" ? [
+      {
+        Sid    = "S3AttachmentsObjects"
+        Effect = "Allow"
+        Action = [
+          "s3:DeleteObject",
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "${local.attachments_bucket_arn}/*"
+      },
+      {
+        Sid      = "S3AttachmentsList"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = local.attachments_bucket_arn
+      }
+    ] : []
+  )
 }
 
 resource "aws_ecs_cluster" "this" {
@@ -13,8 +57,8 @@ resource "aws_iam_role" "task_execution" {
     Version = "2012-10-17"
     Statement = [
       {
-        Action    = "sts:AssumeRole"
-        Effect    = "Allow"
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
         Principal = {
           Service = "ecs-tasks.amazonaws.com"
         }
@@ -28,6 +72,34 @@ resource "aws_iam_role_policy_attachment" "task_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+resource "aws_iam_role" "task" {
+  name = "${var.name}-task-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "task" {
+  count = length(local.task_policy_statements) > 0 ? 1 : 0
+  name  = "${var.name}-task-access"
+  role  = aws_iam_role.task.id
+
+  policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = local.task_policy_statements
+  })
+}
+
 resource "aws_cloudwatch_log_group" "service" {
   name              = "/ecs/${var.name}"
   retention_in_days = 14
@@ -39,10 +111,10 @@ resource "aws_security_group" "service" {
   vpc_id      = var.vpc_id
 
   ingress {
-    description = "From ALB"
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
+    description     = "From ALB"
+    from_port       = 3000
+    to_port         = 3000
+    protocol        = "tcp"
     security_groups = [var.alb_security_group_id]
   }
 
@@ -85,6 +157,7 @@ resource "aws_ecs_task_definition" "this" {
   cpu                      = tostring(var.cpu)
   memory                   = tostring(var.memory)
   execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.task.arn
 
   container_definitions = jsonencode([
     {
@@ -99,7 +172,7 @@ resource "aws_ecs_task_definition" "this" {
         }
       ]
       environment = local.environment
-      secrets      = local.secrets
+      secrets     = local.secrets
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -148,11 +221,11 @@ resource "aws_iam_role_policy" "task_execution_secrets" {
 }
 
 resource "aws_ecs_service" "this" {
-  name            = "${var.name}-svc"
-  cluster         = aws_ecs_cluster.this.id
-  task_definition = aws_ecs_task_definition.this.arn
-  desired_count   = var.desired_count
-  launch_type     = "FARGATE"
+  name                              = "${var.name}-svc"
+  cluster                           = aws_ecs_cluster.this.id
+  task_definition                   = aws_ecs_task_definition.this.arn
+  desired_count                     = var.desired_count
+  launch_type                       = "FARGATE"
   health_check_grace_period_seconds = var.health_check_grace_period
 
   network_configuration {

@@ -24,7 +24,7 @@ VECTOR_STORE_ID=vs_68f6372d0fc48191a629f4a6eb0a7806
 # ROUTER_MAX_OUTPUT_TOKENS=400
 # PROMPT_CACHE_ENABLED=true
 # HEAVY_STREAM=true  # Default: enabled for streaming responses
-# HEAVY_MAX_OUTPUT_TOKENS=900
+# HEAVY_MAX_OUTPUT_TOKENS=2400  # Default: 2400 (increased to prevent incomplete responses)
 # HISTORY_MAX_TURNS=4
 # HISTORY_MAX_CHAR_LENGTH=2400
 # VECTOR_MAX_RESULTS=6
@@ -115,6 +115,12 @@ npm run dev             # launches the chat UI at http://localhost:5173
   - Persists attachment metadata (name, MIME type, size, storage key, download URL) in the ChatKit store.
 - Image attachments are re-signed on demand and described automatically via `IMAGE_DESCRIPTION_MODEL`, so every cascade run receives a short summary plus the download link in the user’s message context (no more manual composer prefill).
 - ECS tasks only need `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` on the configured bucket/prefix. All uploads bypass the server, and download URLs are short-lived presigned GETs that the models can follow.
+
+### Chat history persistence (DynamoDB)
+
+- The ChatKit backend now persists threads/messages in DynamoDB so users don’t lose their conversation whenever an ECS task restarts or the ALB sends them to another container. Set `CHATKIT_STORE_TABLE` (and optionally `CHATKIT_STORE_THREADS_INDEX`, default `gsi1`) to enable the Dynamo store; if the variable is missing the server falls back to the old in-memory store (handy for local dev, but **ephemeral**).
+- Terraform automatically provisions the `fyi-cascade-chatkit` table (PAYG, partition key `pk`, sort key `sk`, GSI `gsi1`) and injects the environment variables/IAM permissions the service needs. If you manage the infrastructure manually, create the table yourself and update `CHATKIT_STORE_TABLE` accordingly.
+- The ECS task role now has DynamoDB + scoped S3 permissions, so no static AWS keys are required inside the container. Make sure `ATTACHMENTS_BUCKET` matches the bucket you grant access to.
 
 ### Container deployment
 

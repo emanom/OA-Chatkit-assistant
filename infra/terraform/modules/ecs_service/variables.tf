@@ -80,3 +80,27 @@ variable "health_check_grace_period" {
   default     = 60
 }
 
+variable "chatkit_store_table_name" {
+  description = "DynamoDB table that stores ChatKit threads/items."
+  type        = string
+  default     = ""
+}
+
+variable "chatkit_store_threads_index" {
+  description = "Name of the DynamoDB GSI used for listing threads."
+  type        = string
+  default     = "gsi1"
+}
+
+variable "chatkit_store_table_arn" {
+  description = "ARN of the DynamoDB table backing the ChatKit store."
+  type        = string
+  default     = ""
+}
+
+variable "attachments_bucket_name" {
+  description = "S3 bucket used for attachment uploads."
+  type        = string
+  default     = ""
+}
+

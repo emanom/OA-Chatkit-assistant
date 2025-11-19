@@ -24,7 +24,10 @@
         { "name": "PORT", "value": "3000" },
         { "name": "VECTOR_STORE_ID", "value": "vs_68f6372d0fc48191a629f4a6eb0a7806" },
         { "name": "ROUTER_MODEL", "value": "gpt-5-nano" },
-        { "name": "ROUTER_CONFIDENCE_THRESHOLD", "value": "0.75" }
+        { "name": "ROUTER_CONFIDENCE_THRESHOLD", "value": "0.75" },
+        { "name": "CHATKIT_STORE_TABLE", "value": "fyi-cascade-chatkit" },
+        { "name": "CHATKIT_STORE_THREADS_INDEX", "value": "gsi1" },
+        { "name": "ATTACHMENTS_BUCKET", "value": "pubsupchat-attach" }
       ],
       "secrets": [
         {

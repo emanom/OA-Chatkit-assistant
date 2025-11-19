@@ -1,5 +1,5 @@
 import { FyiChatKitServer } from "./chatkitServer.js";
-import { InMemoryChatKitStore } from "./chatkitStore.js";
+import { createChatKitStore } from "./chatkitStore.js";
 import { S3AttachmentStore } from "./s3AttachmentStore.js";
 
 const logger = {
@@ -19,7 +19,7 @@ const logger = {
   },
 };
 
-const chatKitStore = new InMemoryChatKitStore();
+const chatKitStore = createChatKitStore();
 const attachmentStore = new S3AttachmentStore();
 const chatKitServer = new FyiChatKitServer(chatKitStore, attachmentStore, logger);
 
@@ -63,18 +63,67 @@ export async function handleChatKitRequest(req, res) {
       res.flushHeaders?.();
 
       const keepAlive = setupSSEKeepAlive(res);
+      
+      // Track if response has ended to prevent writing after close
+      let responseEnded = false;
+      const checkResponseState = () => {
+        if (responseEnded) return false;
+        if (res.destroyed || res.closed) {
+          responseEnded = true;
+          return false;
+        }
+        return true;
+      };
+      
+      // Handle client disconnect
+      req.on("close", () => {
+        responseEnded = true;
+        clearInterval(keepAlive);
+      });
+      
       try {
         for await (const chunk of result) {
-          res.write(chunk);
+          if (!checkResponseState()) {
+            logger.debug("Client disconnected, stopping stream");
+            break;
+          }
+          
+          try {
+            res.write(chunk);
+          } catch (writeError) {
+            // If write fails, client likely disconnected
+            if (writeError.code === "ECONNRESET" || writeError.code === "EPIPE") {
+              logger.debug("Client disconnected during write", { code: writeError.code });
+              responseEnded = true;
+              break;
+            }
+            throw writeError;
+          }
         }
       } catch (streamError) {
-        logger.error("Error streaming ChatKit response", { error: streamError });
-        if (!res.headersSent) {
-          res.write(`event: error\ndata: ${JSON.stringify({ message: "Stream error occurred" })}\n\n`);
+        logger.error("Error streaming ChatKit response", { 
+          error: streamError.message,
+          stack: streamError.stack,
+          code: streamError.code,
+        });
+        
+        // Only try to send error if connection is still open
+        if (checkResponseState() && !res.headersSent) {
+          try {
+            res.write(`event: error\ndata: ${JSON.stringify({ message: "Stream error occurred" })}\n\n`);
+          } catch (writeError) {
+            logger.debug("Failed to write error event", { error: writeError.message });
+          }
         }
       } finally {
         clearInterval(keepAlive);
-        res.end();
+        if (!responseEnded && !res.destroyed && !res.closed) {
+          try {
+            res.end();
+          } catch (endError) {
+            logger.debug("Error ending response", { error: endError.message });
+          }
+        }
       }
       return;
     }
@@ -87,10 +136,20 @@ export async function handleChatKitRequest(req, res) {
       body: req.body,
     });
     if (!res.headersSent) {
-      res.status(500).json({ 
-        error: "Internal server error",
-        message: error.message,
-      });
+      // Handle NotFoundError more gracefully - this can happen with in-memory stores
+      // when requests are routed to different container instances
+      if (error.name === "NotFoundError" && error.message.includes("Thread")) {
+        res.status(404).json({ 
+          error: "Thread not found",
+          message: "The thread may have been lost due to server restart or load balancing. Please start a new conversation.",
+          code: "THREAD_NOT_FOUND",
+        });
+      } else {
+        res.status(500).json({ 
+          error: "Internal server error",
+          message: error.message,
+        });
+      }
     }
   }
 }

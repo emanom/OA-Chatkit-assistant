@@ -37,3 +37,21 @@ variable "certificate_arn" {
   default     = ""
 }
 
+variable "chatkit_store_table_name" {
+  description = "DynamoDB table name used to persist ChatKit threads and items."
+  type        = string
+  default     = "fyi-cascade-chatkit"
+}
+
+variable "chatkit_store_threads_index" {
+  description = "Global secondary index name for listing ChatKit threads."
+  type        = string
+  default     = "gsi1"
+}
+
+variable "attachments_bucket_name" {
+  description = "S3 bucket that stores user-uploaded attachments."
+  type        = string
+  default     = "pubsupchat-attach"
+}
+

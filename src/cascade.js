@@ -39,7 +39,7 @@ const BASE_CONFIG = {
   routerMaxOutputTokens: parseNumberEnv(process.env.ROUTER_MAX_OUTPUT_TOKENS),
   heavyTemperature: parseFloatEnv(process.env.HEAVY_TEMPERATURE),
   heavyTopP: parseFloatEnv(process.env.HEAVY_TOP_P),
-  heavyMaxOutputTokens: parseNumberEnv(process.env.HEAVY_MAX_OUTPUT_TOKENS) ?? 1200,
+  heavyMaxOutputTokens: parseNumberEnv(process.env.HEAVY_MAX_OUTPUT_TOKENS) ?? 2400,
   promptCacheEnabled: parseBooleanEnv(process.env.PROMPT_CACHE_ENABLED, true),
   heavyStreamingEnabled: parseBooleanEnv(process.env.HEAVY_STREAM, true),
   historyMaxTurns: parseNumberEnv(process.env.HISTORY_MAX_TURNS) ?? 4,
@@ -234,12 +234,14 @@ Response policy:
 - **IMPORTANT:** If the user says "I need to raise a support request", "create a ticket", "escalate", "talk to a human", or similar, set "handoff" to true immediately - do not try to answer the question yourself.
 - Set "handoff" to true when: (1) user explicitly requests support ticket/escalation, (2) file search produced no useful FYI articles, or (3) the question truly demands human escalation. Otherwise respond yourself with "handoff": false.
 - If "handoff" is true, set "answer" to a brief acknowledgement in Markdown (e.g., "Let me check that for you while I confirm the details.") and explain why escalation is needed in "reason".
-- **Suggestion Buttons (IMPORTANT):** You MUST include suggestion buttons when appropriate. Add them at the END of your "answer" field using this exact format: \`[BUTTONS:{"buttons":[{"label":"Yes","value":"Yes"},{"label":"No","value":"No"}]}]\`. 
+- **Suggestion Buttons (IMPORTANT):** The "buttons" field is required but can be an empty array [] when buttons are not needed. Use the "buttons" field in your JSON response (NOT in the answer text).
   - **ALWAYS include buttons** after asking questions (e.g., "Did that help?", "Is this what you need?")
   - **ALWAYS include buttons** after explaining features or providing solutions
-  - Use 2-4 buttons maximum with relevant options
-  - The button marker is automatically removed and converted to clickable buttons
-  - Examples: After "Did that help?" → \`[BUTTONS:{"buttons":[{"label":"Yes, it did","value":"Yes, it did"},{"label":"No, it didn't","value":"No, it didn't"}]}]\`
+  - Use 2-4 buttons maximum with relevant options, or use an empty array [] if buttons are not appropriate
+  - Each button needs both "label" (what user sees) and "value" (what gets sent when clicked)
+  - Example with buttons: \`"buttons": [{"label": "Yes, it did", "value": "Yes, it did"}, {"label": "No, it didn't", "value": "No, it didn't"}]\`
+  - Example without buttons: \`"buttons": []\`
+  - If you cannot use the buttons field, you can fallback to adding buttons at the END of your "answer" field using: \`[BUTTONS:{"buttons":[{"label":"Yes","value":"Yes"}]}]\`
 - Never include any text outside the JSON object.
 `.trim();
 
@@ -350,28 +352,105 @@ const extractButtonsFromText = (text) => {
     // Always check for button keywords to help debug
     const hasButtonKeyword = text.includes("BUTTONS") || text.includes("buttons");
     if (hasButtonKeyword) {
-      console.log("[cascade] ⚠️ Text contains 'BUTTONS' but pattern didn't match. Last 300 chars:", text.slice(-300));
-      // Try a more lenient pattern
-      const lenientPattern = /\[BUTTONS[:\s]*(\{[\s\S]*?\})\s*\]/i;
+      const last300 = text.slice(-300);
+      console.log("[cascade] ⚠️ Text contains 'BUTTONS' but pattern didn't match. Last 300 chars:", last300);
+      
+      // Try a more lenient pattern that handles incomplete JSON
+      const lenientPattern = /\[BUTTONS[:\s]*(\{[\s\S]*?)\s*\]?/i;
       const lenientMatch = text.match(lenientPattern);
       if (lenientMatch) {
-        console.log("[cascade] ✓ Found buttons with lenient pattern");
-        // Continue with lenientMatch instead of match
-        const buttonData = JSON.parse(lenientMatch[1]);
-        const buttons = Array.isArray(buttonData?.buttons) ? buttonData.buttons : null;
-        if (buttons && buttons.length > 0) {
-          const cleanedText = text.replace(lenientPattern, "").trim();
-          const validButtons = buttons
-            .filter(btn => btn && typeof btn === "object")
+        const matchedJson = lenientMatch[1];
+        console.log("[cascade] Found potential button JSON (may be incomplete):", matchedJson.substring(0, 300));
+        console.log("[cascade] Full matched JSON length:", matchedJson.length);
+        
+        // Try to extract buttons even from incomplete JSON using regex
+        // Look for button patterns: "label":"...","value":"..."
+        const buttonRegex = /"label"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"/g;
+        const extractedButtons = [];
+        let buttonMatch;
+        let lastIndex = 0;
+        while ((buttonMatch = buttonRegex.exec(matchedJson)) !== null) {
+          const label = buttonMatch[1].replace(/\\'/g, "'").replace(/\\"/g, '"').replace(/\\n/g, '\n');
+          const value = buttonMatch[2].replace(/\\'/g, "'").replace(/\\"/g, '"').replace(/\\n/g, '\n');
+          if (label && value) {
+            extractedButtons.push({ label, value });
+            console.log(`[cascade] Found button via regex: "${label}" = "${value}"`);
+          }
+          lastIndex = buttonMatch.index + buttonMatch[0].length;
+        }
+        
+        // If no buttons found with standard pattern, try a more lenient pattern
+        // that handles cases where JSON might be malformed
+        if (extractedButtons.length === 0) {
+          console.log("[cascade] Standard regex didn't find buttons, trying lenient pattern");
+          // Try to find any label/value pairs, even if format is slightly off
+          const lenientButtonRegex = /(?:label|"label")\s*[:=]\s*"([^"]+)"\s*[,}]\s*(?:value|"value")\s*[:=]\s*"([^"]+)"/gi;
+          let lenientMatch;
+          while ((lenientMatch = lenientButtonRegex.exec(matchedJson)) !== null) {
+            const label = lenientMatch[1].replace(/\\'/g, "'").replace(/\\"/g, '"').replace(/\\n/g, '\n');
+            const value = lenientMatch[2].replace(/\\'/g, "'").replace(/\\"/g, '"').replace(/\\n/g, '\n');
+            if (label && value) {
+              extractedButtons.push({ label, value });
+              console.log(`[cascade] Found button via lenient regex: "${label}" = "${value}"`);
+            }
+          }
+        }
+        
+        if (extractedButtons.length > 0) {
+          console.log(`[cascade] ✓ Extracted ${extractedButtons.length} buttons from incomplete JSON using regex`);
+          const validButtons = extractedButtons
             .map(btn => ({
-              label: normalizeDashes(typeof btn.label === "string" ? btn.label.trim() : ""),
-              value: normalizeDashes(typeof btn.value === "string" ? btn.value.trim() : (typeof btn.label === "string" ? btn.label.trim() : "")),
+              label: normalizeDashes(btn.label.trim()),
+              value: normalizeDashes(btn.value.trim()),
             }))
             .filter(btn => btn.label.length > 0 && btn.value.length > 0);
+          
           if (validButtons.length > 0) {
-            console.log(`[cascade] ✓ Extracted ${validButtons.length} buttons with lenient pattern`);
+            // Remove the button marker (try both complete and incomplete patterns)
+            const cleanedText = text.replace(/\[BUTTONS[:\s]*\{[\s\S]*?\}\s*\]/i, "").replace(/\[BUTTONS[:\s]*\{[\s\S]*$/i, "").trim();
             return { text: cleanedText, buttons: validButtons };
           }
+        }
+        
+        // If regex extraction failed, try parsing the JSON (might work if it's just missing closing brackets)
+        try {
+          // Try to complete the JSON if it's missing closing brackets
+          let jsonStr = lenientMatch[1].trim();
+          if (!jsonStr.endsWith("}")) {
+            // Count open braces and add closing ones
+            const openBraces = (jsonStr.match(/\{/g) || []).length;
+            const closeBraces = (jsonStr.match(/\}/g) || []).length;
+            const missingBraces = openBraces - closeBraces;
+            if (missingBraces > 0) {
+              jsonStr += "}".repeat(missingBraces);
+            }
+            // If it looks like an array, add closing bracket
+            if (jsonStr.includes('"buttons"') && !jsonStr.includes(']')) {
+              jsonStr = jsonStr.replace(/"buttons"\s*:\s*\[/, '"buttons":[');
+              if (!jsonStr.endsWith("]")) {
+                jsonStr += "]";
+              }
+            }
+          }
+          
+          const buttonData = JSON.parse(jsonStr);
+          const buttons = Array.isArray(buttonData?.buttons) ? buttonData.buttons : null;
+          if (buttons && buttons.length > 0) {
+            console.log(`[cascade] ✓ Parsed incomplete JSON successfully, found ${buttons.length} buttons`);
+            const cleanedText = text.replace(/\[BUTTONS[:\s]*\{[\s\S]*?\}\s*\]/i, "").trim();
+            const validButtons = buttons
+              .filter(btn => btn && typeof btn === "object")
+              .map(btn => ({
+                label: normalizeDashes(typeof btn.label === "string" ? btn.label.trim() : ""),
+                value: normalizeDashes(typeof btn.value === "string" ? btn.value.trim() : (typeof btn.label === "string" ? btn.label.trim() : "")),
+              }))
+              .filter(btn => btn.label.length > 0 && btn.value.length > 0);
+            if (validButtons.length > 0) {
+              return { text: cleanedText, buttons: validButtons };
+            }
+          }
+        } catch (parseError) {
+          console.log("[cascade] Could not parse incomplete JSON:", parseError.message);
         }
       }
     }
@@ -633,6 +712,52 @@ const buildContentArray = (text, imageUrls = []) => {
   return content.length > 0 ? content : asInputText(text || "");
 };
 
+const generateTicketSubject = (userMessage) => {
+  if (!userMessage || typeof userMessage !== "string") {
+    return "Support Request";
+  }
+  
+  // Remove common ticket request phrases
+  let cleaned = userMessage
+    .toLowerCase()
+    .replace(/\b(i need|i'd like|please|can you|could you)\s+(to\s+)?(raise|create|log|open|submit)\s+(a\s+)?(support\s+)?ticket\b/gi, "")
+    .replace(/\bsupport\s+ticket\s+(urgently|urgent|please|now)?\b/gi, "")
+    .replace(/\bescalate\s+(this|it|to|for)?\b/gi, "")
+    .replace(/\btalk\s+to\s+(a\s+)?(human|person|someone|agent)\b/gi, "")
+    .replace(/\bcontact\s+support\b/gi, "")
+    .replace(/\bspeak\s+to\s+someone\b/gi, "")
+    .trim();
+  
+  // If nothing left after cleaning, use original message
+  if (!cleaned || cleaned.length < 10) {
+    cleaned = userMessage.trim();
+  }
+  
+  // Extract first sentence or first 100 characters
+  const firstSentence = cleaned.split(/[.!?]\s+/)[0] || cleaned;
+  let subject = firstSentence.substring(0, 100).trim();
+  
+  // Capitalize first letter
+  if (subject.length > 0) {
+    subject = subject.charAt(0).toUpperCase() + subject.slice(1);
+  }
+  
+  // Remove trailing punctuation if it's incomplete
+  subject = subject.replace(/[,;:]$/, "");
+  
+  // Ensure it's not empty
+  if (!subject || subject.length < 5) {
+    return "Support Request";
+  }
+  
+  // Limit to 80 characters for Zendesk subject line best practices
+  if (subject.length > 80) {
+    subject = subject.substring(0, 77) + "...";
+  }
+  
+  return subject;
+};
+
 const clampVectorResults = (value) => {
   if (value == null) return undefined;
   if (!Number.isFinite(value)) return undefined;
@@ -653,12 +778,11 @@ const buildFileSearchTool = (config) => {
 
 const buildRouterTools = (config) => {
   const fileSearch = buildFileSearchTool(config);
-  const zendeskTool = buildZendeskTool();
-  const tools = [];
-  if (fileSearch) tools.push(fileSearch);
-  // Add Zendesk tool to router so it can create tickets if user explicitly requests
-  if (zendeskTool) tools.push(zendeskTool);
-  return tools.length > 0 ? tools : undefined;
+  // Note: Zendesk tool is NOT added to router because router uses structured output parsing
+  // which conflicts with tool usage. Router should only decide to hand off to heavy agent,
+  // and heavy agent (which doesn't use structured output) can create tickets.
+  if (!fileSearch) return undefined;
+  return [fileSearch];
 };
 
 const buildZendeskTool = () => {
@@ -840,19 +964,129 @@ export async function runCascade({
   }
   
   console.log("[cascade] Router API call - model:", config.routerModel);
-  const routerResponse = await openai.responses.parse(routerRequest);
+  console.log("[cascade] Router request (sanitized):", {
+    model: routerRequest.model,
+    hasTools: !!routerRequest.tools,
+    toolsCount: routerRequest.tools?.length,
+    hasInstructions: !!routerRequest.instructions,
+    inputLength: routerRequest.input?.length,
+  });
+  
+  let routerResponse;
+  try {
+    routerResponse = await openai.responses.parse(routerRequest);
+    console.log("[cascade] ✓ Router response received successfully");
+  } catch (error) {
+    console.error("[cascade] ✗✗✗ FAILED TO CREATE ROUTER REQUEST ✗✗✗");
+    console.error("[cascade] Router request error:", {
+      message: error.message,
+      status: error.status,
+      code: error.code,
+      type: error.type,
+      response: error.response?.data,
+      fullError: JSON.stringify(error, Object.getOwnPropertyNames(error)),
+    });
+    throw error;
+  }
 
   const decision = routerResponse.output_parsed;
   const routerLatencyMs = performance.now() - routerStart;
 
+  console.log("[cascade] Router response details:", {
+    hasOutputParsed: !!decision,
+    outputParsedType: typeof decision,
+    outputParsedKeys: decision ? Object.keys(decision) : null,
+    hasButtons: decision ? Array.isArray(decision.buttons) : false,
+    buttonsCount: decision && Array.isArray(decision.buttons) ? decision.buttons.length : 0,
+    buttonsPreview: decision && Array.isArray(decision.buttons) ? JSON.stringify(decision.buttons).substring(0, 200) : null,
+    hasOutput: !!routerResponse.output,
+    outputLength: Array.isArray(routerResponse.output) ? routerResponse.output.length : 0,
+    outputTypes: Array.isArray(routerResponse.output) ? routerResponse.output.map(item => item?.type) : null,
+    rawOutput: routerResponse.output ? JSON.stringify(routerResponse.output).substring(0, 1000) : null,
+  });
+
+  // Check if router made tool calls instead of returning structured output
+  if (routerResponse.output && Array.isArray(routerResponse.output)) {
+    const toolCalls = routerResponse.output.filter(item => item?.type === "tool_call");
+    if (toolCalls.length > 0) {
+      console.warn("[cascade] ⚠️ Router made tool calls instead of returning structured output:", {
+        toolCallCount: toolCalls.length,
+        toolCallNames: toolCalls.map(tc => tc.name),
+      });
+      // This shouldn't happen with structured output, but if it does, we need to handle it
+      // For now, log and continue - the structured output should still be there
+    }
+  }
+
   if (!decision) {
+    console.error("[cascade] ✗✗✗ ROUTER DID NOT RETURN PARSABLE DECISION ✗✗✗");
+    console.error("[cascade] Router response structure:", {
+      hasOutputParsed: !!routerResponse.output_parsed,
+      hasOutput: !!routerResponse.output,
+      outputType: Array.isArray(routerResponse.output) ? "array" : typeof routerResponse.output,
+      outputLength: Array.isArray(routerResponse.output) ? routerResponse.output.length : "N/A",
+      fullResponse: JSON.stringify(routerResponse, null, 2).substring(0, 2000),
+    });
     throw new Error("Router agent did not return a parsable decision.");
   }
 
   const rawRouterAnswer = (decision.answer ?? "").trim();
   console.log("[cascade] Router answer length:", rawRouterAnswer.length);
   console.log("[cascade] Router answer preview:", rawRouterAnswer.substring(0, 200));
-  const { text: routerAnswerText, buttons: routerButtons } = extractButtonsFromText(rawRouterAnswer);
+  
+  // First, try to get buttons from structured output (preferred - won't be truncated)
+  let routerButtons = null;
+  console.log("[cascade] Checking for buttons in decision:", {
+    hasDecision: !!decision,
+    hasButtonsProperty: decision ? 'buttons' in decision : false,
+    buttonsType: decision ? typeof decision.buttons : null,
+    isArray: decision ? Array.isArray(decision.buttons) : false,
+    buttonsValue: decision ? decision.buttons : null,
+  });
+  
+  if (Array.isArray(decision.buttons) && decision.buttons.length > 0) {
+    console.log(`[cascade] Processing ${decision.buttons.length} buttons from structured output`);
+    routerButtons = decision.buttons
+      .filter(btn => {
+        const isValid = btn && typeof btn === "object" && btn.label && btn.value;
+        if (!isValid) {
+          console.log("[cascade] Filtered out invalid button:", btn);
+        }
+        return isValid;
+      })
+      .map(btn => ({
+        label: normalizeDashes(String(btn.label).trim()),
+        value: normalizeDashes(String(btn.value).trim()),
+      }))
+      .filter(btn => {
+        const isValid = btn.label.length > 0 && btn.value.length > 0;
+        if (!isValid) {
+          console.log("[cascade] Filtered out empty button:", btn);
+        }
+        return isValid;
+      });
+    if (routerButtons.length > 0) {
+      console.log(`[cascade] ✓ Found ${routerButtons.length} buttons in structured output:`, routerButtons);
+    } else {
+      console.log("[cascade] No valid buttons after filtering");
+      routerButtons = null;
+    }
+  } else {
+    console.log("[cascade] No buttons array found in decision or array is empty");
+  }
+  
+  // Fallback: try extracting from answer text (in case buttons weren't in structured output)
+  if (!routerButtons) {
+    const { text: routerAnswerText, buttons: extractedButtons } = extractButtonsFromText(rawRouterAnswer);
+    if (extractedButtons && extractedButtons.length > 0) {
+      routerButtons = extractedButtons;
+      console.log(`[cascade] ✓ Extracted ${routerButtons.length} buttons from answer text`);
+    }
+  }
+  
+  // Clean answer text (remove button markers if they were embedded)
+  const { text: routerAnswerText } = extractButtonsFromText(rawRouterAnswer);
+  
   console.log("[cascade] Router buttons extracted:", routerButtons);
   if (!routerButtons && process.env.DEBUG) {
     console.log("[cascade] Router answer text (last 500 chars):", rawRouterAnswer.slice(-500));
@@ -1010,7 +1244,7 @@ export async function runCascade({
   if (config.heavyMaxOutputTokens != null) {
     heavyRequest.max_output_tokens = config.heavyMaxOutputTokens;
   } else {
-    heavyRequest.max_output_tokens = 1600;
+    heavyRequest.max_output_tokens = 2400;
   }
 
   const heavyTools = buildHeavyTools(config, context);
@@ -1145,10 +1379,11 @@ export async function runCascade({
     }
   };
 
-  let heavyResponse;
+  let heavyResponse = null;
   let heavyAnswer = "";
   let heavyEvents = debugStream ? [] : undefined;
   let functionCallResults = [];
+  let responseIncomplete = false;
 
   if (config.heavyStreamingEnabled) {
     console.log("[cascade] Heavy agent API call (streaming) - model:", config.heavyModel);
@@ -1165,6 +1400,20 @@ export async function runCascade({
       stream: true,
     };
 
+    // Log the actual request being sent (sanitized for debugging)
+    console.log("[cascade] Heavy streaming request details:", {
+      model: streamingRequest.model,
+      hasTools: !!streamingRequest.tools,
+      toolsCount: streamingRequest.tools?.length,
+      toolsTypes: streamingRequest.tools?.map(t => t.type),
+      hasInstructions: !!streamingRequest.instructions,
+      instructionsLength: streamingRequest.instructions?.length,
+      hasInput: !!streamingRequest.input,
+      inputLength: Array.isArray(streamingRequest.input) ? streamingRequest.input.length : 0,
+      stream: streamingRequest.stream,
+      hasMetadata: !!streamingRequest.metadata,
+    });
+
     let stream;
     try {
       stream = await openai.responses.stream(streamingRequest);
@@ -1175,54 +1424,329 @@ export async function runCascade({
         status: error.status,
         code: error.code,
         type: error.type,
+        requestId: error.request_id || error.requestId,
         fullError: JSON.stringify(error, Object.getOwnPropertyNames(error)),
       });
       throw error;
     }
 
-    for await (const event of stream) {
-      if (heavyEvents) {
-        heavyEvents.push(event.type);
-      }
-      if (event.type === "response.output_text.delta") {
-        heavyAnswer += event.delta;
-        // Call streaming callback if provided
-        if (typeof onStreamDelta === "function" && event.delta) {
-          onStreamDelta(event.delta);
+    try {
+      for await (const event of stream) {
+        if (heavyEvents) {
+          heavyEvents.push(event.type);
+        }
+        
+        // Detect incomplete responses
+        if (event.type === "response.incomplete") {
+          responseIncomplete = true;
+          console.warn("[cascade] ⚠️ Response marked as incomplete");
+        }
+        
+        // Log all event types to debug tool call detection
+        if (event.type && !event.type.includes("output_text.delta")) {
+          console.log("[cascade] Stream event type:", event.type, {
+            hasToolCall: !!event.tool_call,
+            toolCallName: event.tool_call?.name,
+            hasName: !!event.name,
+            name: event.name,
+            eventKeys: Object.keys(event),
+          });
+        }
+        
+        if (event.type === "response.output_text.delta") {
+          heavyAnswer += event.delta;
+          // Call streaming callback if provided
+          if (typeof onStreamDelta === "function" && event.delta) {
+            onStreamDelta(event.delta);
+          }
+        }
+        // Check for function calls in streaming events
+        // Responses API tool call structure: event.tool_call with name, arguments, etc.
+        if (event.type === "response.tool_call" && event.tool_call) {
+          console.log("[cascade] ===== TOOL CALL EVENT IN STREAM =====");
+          console.log("[cascade] Tool call event received in stream:", {
+            eventType: event.type,
+            toolCallName: event.tool_call?.name,
+            toolCallId: event.tool_call?.id,
+            fullEvent: JSON.stringify(event, null, 2),
+          });
+          const toolCall = event.tool_call;
+          if (toolCall.name === "create_zendesk_ticket") {
+            console.log("[cascade] ✓ Found create_zendesk_ticket tool call in stream - calling handleFunctionCall");
+            const result = await handleFunctionCall(toolCall);
+            if (result) {
+              functionCallResults.push({
+                tool_call_id: toolCall.id,
+                result: result,
+              });
+              console.log("[cascade] ✓ Tool call result added to functionCallResults. Count:", functionCallResults.length);
+            } else {
+              console.warn("[cascade] ✗ handleFunctionCall returned null/empty result");
+            }
+          } else {
+            console.log("[cascade] Tool call is not create_zendesk_ticket, skipping. Name:", toolCall.name);
+          }
         }
       }
-      // Check for function calls in streaming events
-      // Responses API tool call structure: event.tool_call with name, arguments, etc.
-      if (event.type === "response.tool_call" && event.tool_call) {
-        console.log("[cascade] ===== TOOL CALL EVENT IN STREAM =====");
-        console.log("[cascade] Tool call event received in stream:", {
-          eventType: event.type,
-          toolCallName: event.tool_call?.name,
-          toolCallId: event.tool_call?.id,
-          fullEvent: JSON.stringify(event, null, 2),
-        });
-        const toolCall = event.tool_call;
-        if (toolCall.name === "create_zendesk_ticket") {
-          console.log("[cascade] ✓ Found create_zendesk_ticket tool call in stream - calling handleFunctionCall");
-          const result = await handleFunctionCall(toolCall);
-          if (result) {
-            functionCallResults.push({
-              tool_call_id: toolCall.id,
-              result: result,
-            });
-            console.log("[cascade] ✓ Tool call result added to functionCallResults. Count:", functionCallResults.length);
-          } else {
-            console.warn("[cascade] ✗ handleFunctionCall returned null/empty result");
+
+      try {
+        heavyResponse = await stream.finalResponse();
+      } catch (finalResponseError) {
+        // If finalResponse() fails but we have partial data, create a minimal response object
+        console.warn("[cascade] ⚠️ stream.finalResponse() failed, but continuing with partial data:", finalResponseError.message);
+        heavyResponse = heavyResponse || { output: [], output_text: heavyAnswer };
+        // Re-throw only if we don't have any data
+        if (!heavyAnswer && functionCallResults.length === 0) {
+          throw finalResponseError;
+        }
+      }
+    } catch (error) {
+      console.error("[cascade] ✗✗✗ ERROR DURING STREAMING OR FINAL RESPONSE ✗✗✗");
+      console.error("[cascade] Streaming/finalResponse error:", {
+        message: error.message,
+        status: error.status,
+        code: error.code,
+        type: error.type,
+        requestId: error.request_id || error.requestId,
+        response: error.response?.data,
+        fullError: JSON.stringify(error, Object.getOwnPropertyNames(error)),
+      });
+      console.error("[cascade] Heavy answer accumulated so far:", {
+        length: heavyAnswer.length,
+        preview: heavyAnswer.substring(0, 200),
+      });
+      console.error("[cascade] Function call results so far:", {
+        count: functionCallResults.length,
+        results: functionCallResults,
+      });
+      
+      // Check if this is a retryable server error
+      const isRetryableError = 
+        error.code === "server_error" || 
+        error.type === "server_error" ||
+        (error.status && error.status >= 500 && error.status < 600);
+      
+      // If we have partial response and it's a retryable error, try non-streaming fallback
+      if (isRetryableError && heavyAnswer.length === 0 && functionCallResults.length === 0) {
+        console.log("[cascade] Attempting fallback to non-streaming mode due to server error...");
+        try {
+          // Fallback to non-streaming request
+          const nonStreamingRequest = {
+            ...heavyRequest,
+            stream: false,
+          };
+          heavyResponse = await openai.responses.create(nonStreamingRequest);
+          console.log("[cascade] ✓ Fallback to non-streaming succeeded");
+          
+          // Extract answer from non-streaming response
+          heavyAnswer = extractOutputText(heavyResponse) || "";
+          
+          // Process tool calls from non-streaming response
+          if (heavyResponse.output && Array.isArray(heavyResponse.output)) {
+            for (const item of heavyResponse.output) {
+              if ((item?.type === "function_call" || item?.type === "tool_call") && item.name === "create_zendesk_ticket") {
+                const result = await handleFunctionCall(item);
+                if (result) {
+                  functionCallResults.push({
+                    tool_call_id: item.id,
+                    result: result,
+                  });
+                }
+              }
+            }
           }
-        } else {
-          console.log("[cascade] Tool call is not create_zendesk_ticket, skipping. Name:", toolCall.name);
+        } catch (fallbackError) {
+          console.error("[cascade] ✗ Fallback to non-streaming also failed:", fallbackError.message);
+          // Create a user-friendly error
+          const userError = new Error(
+            "We're experiencing temporary issues with our AI service. Please try again in a moment. " +
+            `If the problem persists, contact support and mention request ID: ${error.request_id || error.requestId || "unknown"}`
+          );
+          userError.status = error.status || 500;
+          userError.code = error.code || "server_error";
+          throw userError;
+        }
+      } else {
+        // For non-retryable errors or if we have partial data, create user-friendly error
+        if (isRetryableError) {
+          const userError = new Error(
+            "We're experiencing temporary issues with our AI service. Please try again in a moment. " +
+            `If the problem persists, contact support and mention request ID: ${error.request_id || error.requestId || "unknown"}`
+          );
+          userError.status = error.status || 500;
+          userError.code = error.code || "server_error";
+          throw userError;
+        }
+        throw error;
+      }
+    }
+    
+    // Log final response details for debugging
+    console.log("[cascade] Heavy stream final response:", {
+      hasOutputText: !!heavyResponse.output_text,
+      outputTextLength: heavyResponse.output_text?.length,
+      hasOutput: !!heavyResponse.output,
+      outputLength: Array.isArray(heavyResponse.output) ? heavyResponse.output.length : 0,
+      outputTypes: Array.isArray(heavyResponse.output) ? heavyResponse.output.map(item => item?.type) : null,
+      functionCallResultsCount: functionCallResults.length,
+    });
+    
+    // Check for tool calls in the final response (in case they weren't captured in stream events)
+    // Responses API can have tool calls as "function_call" or "tool_call" types
+    if (heavyResponse.output && Array.isArray(heavyResponse.output)) {
+      console.log("[cascade] Checking final response output for tool calls...");
+      console.log("[cascade] Full output array structure:", JSON.stringify(heavyResponse.output.map(item => ({
+        type: item?.type,
+        name: item?.name,
+        id: item?.id,
+        hasArguments: !!item?.arguments,
+      })), null, 2));
+      
+      for (let i = 0; i < heavyResponse.output.length; i++) {
+        const item = heavyResponse.output[i];
+        console.log(`[cascade] Checking output item ${i + 1}/${heavyResponse.output.length}:`, {
+          type: item?.type,
+          name: item?.name,
+          id: item?.id,
+          hasArguments: !!item?.arguments,
+          fullItem: JSON.stringify(item).substring(0, 500),
+        });
+        
+        // Responses API uses "function_call" type for tool calls
+        if (item?.type === "function_call") {
+          console.log("[cascade] ✓ Found function_call in final response:", {
+            type: item.type,
+            name: item.name,
+            id: item.id,
+            hasArguments: !!item.arguments,
+            argumentsPreview: typeof item.arguments === "string" ? item.arguments.substring(0, 200) : JSON.stringify(item.arguments).substring(0, 200),
+          });
+          if (item.name === "create_zendesk_ticket") {
+            // Check if we already processed this tool call
+            const alreadyProcessed = functionCallResults.some(r => r.tool_call_id === item.id);
+            if (!alreadyProcessed) {
+              console.log("[cascade] Processing function_call from final response (wasn't in stream events)");
+              const result = await handleFunctionCall(item);
+              if (result) {
+                functionCallResults.push({
+                  tool_call_id: item.id,
+                  result: result,
+                });
+                console.log("[cascade] ✓ Tool call result added from final response. Count:", functionCallResults.length);
+              }
+            } else {
+              console.log("[cascade] Tool call already processed from stream events");
+            }
+          } else {
+            console.log("[cascade] Function call is not create_zendesk_ticket. Name:", item.name);
+          }
+        } else if (item?.type === "tool_call") {
+          // Also check for "tool_call" type (legacy format)
+          console.log("[cascade] ✓ Found tool_call in final response:", {
+            type: item.type,
+            name: item.name,
+            id: item.id,
+          });
+          if (item.name === "create_zendesk_ticket") {
+            const alreadyProcessed = functionCallResults.some(r => r.tool_call_id === item.id);
+            if (!alreadyProcessed) {
+              console.log("[cascade] Processing tool_call from final response");
+              const result = await handleFunctionCall(item);
+              if (result) {
+                functionCallResults.push({
+                  tool_call_id: item.id,
+                  result: result,
+                });
+                console.log("[cascade] ✓ Tool call result added from final response. Count:", functionCallResults.length);
+              }
+            }
+          }
         }
       }
     }
-
-    heavyResponse = await stream.finalResponse();
+    
     if (!heavyAnswer) {
       heavyAnswer = extractOutputText(heavyResponse);
+      console.log("[cascade] Extracted answer from final response, length:", heavyAnswer.length);
+    } else {
+      console.log("[cascade] Using accumulated answer from stream deltas, length:", heavyAnswer.length);
+    }
+    
+    // Fallback: If response was incomplete and ticket was explicitly requested but not created, create it
+    // Check even if there's partial text, as long as no ticket was created
+    if (responseIncomplete && functionCallResults.length === 0) {
+      const userMessage = typeof question === "string" ? question.toLowerCase() : "";
+      const explicitTicketRequest = 
+        userMessage.includes("raise a support request") ||
+        userMessage.includes("create a ticket") ||
+        userMessage.includes("log a ticket") ||
+        userMessage.includes("support ticket") ||
+        userMessage.includes("escalate") ||
+        userMessage.includes("talk to a human") ||
+        userMessage.includes("contact support") ||
+        userMessage.includes("speak to someone") ||
+        userMessage.includes("i need a support ticket") ||
+        userMessage.includes("i need a ticket");
+      
+      if (explicitTicketRequest) {
+        console.warn("[cascade] ⚠️ Response incomplete and ticket was requested but not created - creating ticket as fallback");
+        try {
+          const isTestTicket = userMessage.includes("test ticket");
+          let ticketSubject = generateTicketSubject(question);
+          let ticketDescription = `User requested support ticket.\n\nOriginal message: ${question}`;
+          let requesterEmail = context?.userEmail || undefined;
+          let requesterName = context?.firstName && context?.lastName
+            ? `${context.firstName} ${context.lastName}`.trim()
+            : undefined;
+          
+          if (isTestTicket) {
+            const timestamp = new Date().toISOString();
+            ticketSubject = "Test Ticket";
+            ticketDescription = `This is a test ticket created for testing purposes.\n\nCreated at: ${timestamp}`;
+            requesterEmail = "manny.letellier@fyi.app";
+            requesterName = "Manny Letellier";
+          }
+          
+          console.log("[cascade] Generated ticket subject:", ticketSubject);
+          
+          const ticketResult = await createZendeskTicket({
+            subject: ticketSubject,
+            description: ticketDescription,
+            priority: 3, // High priority for urgent requests
+            type: "incident",
+            requesterEmail,
+            requesterName,
+          });
+          
+          const ticketResultJson = JSON.stringify({
+            success: true,
+            ticketId: ticketResult.ticketId,
+            ticketUrl: ticketResult.ticketUrl,
+            message: `Support ticket #${ticketResult.ticketId} has been created successfully.`,
+          });
+          
+          functionCallResults.push({
+            tool_call_id: `fallback_${Date.now()}`,
+            result: ticketResultJson,
+          });
+          
+          // Append ticket info to existing answer if any, otherwise create new message
+          if (heavyAnswer && heavyAnswer.trim().length > 0) {
+            heavyAnswer = `${heavyAnswer.trim()}\n\nI've created support ticket #${ticketResult.ticketId} for you. The support team will investigate your issue. You can view the ticket here: ${ticketResult.ticketUrl}`;
+          } else {
+            heavyAnswer = `I've created support ticket #${ticketResult.ticketId} for you. The support team will investigate your issue. You can view the ticket here: ${ticketResult.ticketUrl}`;
+          }
+          console.log("[cascade] ✓ Fallback ticket created successfully:", ticketResult.ticketId);
+          
+          // Emit completion event to stop UI status updates
+          if (typeof onProgress === "function") {
+            onProgress("cascade.stage complete");
+          }
+        } catch (fallbackError) {
+          console.error("[cascade] ✗ Fallback ticket creation failed:", fallbackError.message);
+          heavyAnswer = "I encountered an issue while creating your support ticket. Please try again or contact support directly.";
+        }
+      }
     }
   } else {
     console.log("[cascade] Heavy agent API call (non-streaming) - model:", config.heavyModel);
@@ -1392,7 +1916,7 @@ export async function runCascade({
       raw: routerResponse,
     },
     heavy: {
-      raw: heavyResponse,
+      raw: heavyResponse || { output: [], incomplete: responseIncomplete },
       events: heavyEvents,
     },
     timings: {

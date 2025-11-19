@@ -21,6 +21,44 @@ module "load_balancer" {
   enable_http_redirect = true
 }
 
+resource "aws_dynamodb_table" "chatkit_store" {
+  name         = var.chatkit_store_table_name
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+  range_key    = "sk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "sk"
+    type = "S"
+  }
+
+  attribute {
+    name = "gsi1pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "gsi1sk"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = var.chatkit_store_threads_index
+    hash_key        = "gsi1pk"
+    range_key       = "gsi1sk"
+    projection_type = "ALL"
+  }
+
+  tags = {
+    Name = "${local.project_name}-chatkit-store"
+  }
+}
+
 module "ecs_service" {
   source = "../../modules/ecs_service"
 
@@ -43,6 +81,13 @@ module "ecs_service" {
       HEAVY_REASONING             = "low"
       HEAVY_MAX_OUTPUT_TOKENS     = "900"
     },
+    var.chatkit_store_table_name != "" ? {
+      CHATKIT_STORE_TABLE         = var.chatkit_store_table_name
+      CHATKIT_STORE_THREADS_INDEX = var.chatkit_store_threads_index
+    } : {},
+    var.attachments_bucket_name != "" ? {
+      ATTACHMENTS_BUCKET = var.attachments_bucket_name
+    } : {},
     var.additional_environment
   )
   secrets = merge(
@@ -53,6 +98,10 @@ module "ecs_service" {
       OPENAI_DOMAIN_KEY = var.openai_domain_key_secret_arn
     } : {}
   )
+  chatkit_store_table_name    = var.chatkit_store_table_name
+  chatkit_store_threads_index = var.chatkit_store_threads_index
+  chatkit_store_table_arn     = aws_dynamodb_table.chatkit_store.arn
+  attachments_bucket_name     = var.attachments_bucket_name
 }
 
 output "alb_dns_name" {
